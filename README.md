@@ -6,8 +6,8 @@ A mechanistic ODE model of the AP-1 network capturing dimerization-controlled, c
 
 ```
 .
-├── analysis/           # Jupyter notebooks for all analyses (run in order)
-├── src/               # Python modules for analysis
+├── analysis/           # Jupyter notebooks and R scripts (run in order)
+├── src/               # Python modules, COPASI model, and simulation scripts
 └── README.md
 ```
 
@@ -22,6 +22,12 @@ The notebooks should be run in numerical order. Each notebook corresponds to spe
 - **Analyses**: UMAP dimensionality reduction, PCA, violin plots
 - **Outputs**: Processed experimental data for model calibration
 - **Manuscript figures**: Figure 1, Supplementary Figure S1
+
+**`plot_clustermap_figure1A.R`** (standalone)
+- **Purpose**: Generates clustermap visualization of single-cell data
+- **Inputs**: Raw 4i single-cell data (independent - reads data directly)
+- **Analyses**: Hierarchical clustering of 5 AP-1 proteins + 2 differentiation markers across cell lines
+- **Manuscript figures**: Figure 1A
 
 ### Stage 2: Model Simulations
 
@@ -46,6 +52,12 @@ The notebooks should be run in numerical order. Each notebook corresponds to spe
 - **Outputs**: Calibrated parameter sets for downstream analysis
 - **Manuscript figures**: Figure 3A (calibration logic)
 
+**`04b_plot_upset_calibration_figure3B.R`**
+- **Purpose**: Visualizes parameter set retention and overlap across cell lines
+- **Inputs**: Outputs from notebook 04
+- **Analyses**: Upset plot showing shared/unique calibrated parameter sets among 19 cell lines
+- **Manuscript figures**: Figure 3B
+
 ### Stage 4: Calibrated Model Analysis
 
 **`05_UMAP_calibrated_cells.ipynb`**
@@ -59,6 +71,13 @@ The notebooks should be run in numerical order. Each notebook corresponds to spe
 - **Analyses**: Partial Least Squares Discriminant Analysis (PLSDA)
 - **Dependencies**: `src/plsda_module.py`
 - **Manuscript figures**: Figure 3 (most panels)
+
+**`06b_COLO858_insilico_perturbations.ipynb`**
+- **Purpose**: Generates in silico perturbation simulations for COLO858 cells
+- **Analyses**: JUND knockdown and combination perturbations using calibrated COLO858 parameter sets
+- **Dependencies**: `src/COLO858_pertrubation_analysis.py`
+- **Outputs**: Perturbation simulation data used by notebooks 09, 10, 11
+- **Manuscript figures**: None (data generation for Figure 7)
 
 **`07_MAPK_AP1_comparison_analysis.ipynb`**
 - **Purpose**: Compares MAPK and AP-1 protein levels between and within cells
@@ -93,24 +112,60 @@ The notebooks should be run in numerical order. Each notebook corresponds to spe
 - **Analyses**: Plotting analysis for perturbation experiments
 - **Manuscript figures**: Figure 7 (one panel)
 
-## Source Code Modules
+## Source Code
+
+### Analysis Modules
 
 **`src/plsda_module.py`**
 - Custom implementation of Partial Least Squares Discriminant Analysis (PLSDA)
 - Used by notebooks: 06, 08, 10
 - Features: Cross-validation, class balancing, ROC analysis
 
+**`src/COLO858_pertrubation_analysis.py`**
+- Module for generating COLO858 perturbation simulations
+- Used by notebook: 06b
+
+### ODE Model and Simulation Infrastructure
+
+**`src/ap1_model_2_mod.cps`**
+- COPASI model file for AP-1 network ODE simulations
+- Used by: `src/run_simulation.py`
+
+**`src/LHS_params_init_conds.py`**
+- Generates 20,000 parameter sets and 210 initial conditions for Latin Hypercube Sampling
+- Output: Input files for large-scale ODE simulations
+
+**`src/run_simulation.py`**
+- Runs ODE simulations using COPASI model across parameter sets and initial conditions
+- Executed on computing cluster via `src/ap1.slurm`
+
+**`src/ap1.slurm`**
+- Slurm batch script for running large-scale simulations on HPC cluster
+
 ## Manuscript Figure Mapping
 
-| Figure | Notebook(s) | Description |
-|--------|-------------|-------------|
-| Figure 1 | `01_process_singlecell_experimental_data.ipynb` | Single-cell experimental data analysis |
+| Figure | Files | Description |
+|--------|-------|-------------|
+| Figure 1A | `plot_clustermap_figure1A.R` | Clustermap of AP-1 proteins and differentiation markers |
+| Figure 1, S1 | `01_process_singlecell_experimental_data.ipynb` | Single-cell experimental data analysis |
 | Figure 2 | `03_analyze_uncalibrated_model.ipynb` | Uncalibrated model dynamics |
 | Figure 3A | `04_calibrate_model_to_experiments.ipynb` | Model calibration logic |
+| Figure 3B | `04b_plot_upset_calibration_figure3B.R` | Upset plot of parameter set retention across cell lines |
 | Figure 3C | `05_UMAP_calibrated_cells.ipynb` | UMAP validation of calibration |
 | Figure 3 (other) | `06_PLSDA_cellline_discrimination.ipynb`, `07_MAPK_AP1_comparison_analysis.ipynb` | Cell line discrimination, MAPK/AP-1 comparisons |
 | Figure 4 | `07_MAPK_AP1_comparison_analysis.ipynb`, `08_PLSDA_heterogeneity_analysis.ipynb` | Protein comparisons, heterogeneity analysis |
 | Figure 5 | `08_PLSDA_heterogeneity_analysis.ipynb` | AP-1 state heterogeneity |
 | Figure 6 | `07_MAPK_AP1_comparison_analysis.ipynb` | ERK inhibition analysis |
 | Figure 7 | `09_COLO858_JUND_KD_analysis.ipynb`, `10_COLO858_FRA2_PLSDA_analysis.ipynb`, `11_COLO858_plot_JUND_KD_perturbations.ipynb` | JUND knockdown perturbation analysis |
-| Figure S1 | `01_process_singlecell_experimental_data.ipynb` | Supplementary experimental data |
+
+## Dependencies
+
+### Python
+- Standard scientific Python stack (numpy, pandas, matplotlib, seaborn, scikit-learn)
+- UMAP for dimensionality reduction
+- COPASI Python API (basico) for ODE simulations
+
+### R
+- tidyverse
+- UpSetR (for upset plots)
+- pheatmap or ComplexHeatmap (for clustermaps)

@@ -44,12 +44,13 @@ def prepare_initial_data(cell, version, folder_path):
     
     return data2
 
-def run_simulations_with_duplicates(fos_data, param_indices):
-    """Your original simulation function"""
+def run_simulations_with_duplicates(fos_data, param_indices, track_monomer_dimer=False):
+    """Your original simulation function with optional monomer/dimer tracking"""
     import simulate_ap1 as sim
     from functools import partial
     
-    all_results = []
+    all_results_totals = []
+    all_results_monomers_dimers = [] if track_monomer_dimer else None
     all_failed_indices = []
     
     total_simulations = sum(len(fos_data[fos_data['param_index'] == param_idx]['init_cond_index'].unique()) 
@@ -66,11 +67,13 @@ def run_simulations_with_duplicates(fos_data, param_indices):
             sim.tqdm = lambda x, **kwargs: x
             
             try:
-                temp_results, failed_indices = sim.run_simulations(temp_df, [param_idx])
+                totals_df, mon_dim_df, failed_indices = sim.run_simulations(
+                    temp_df, [param_idx], track_monomer_dimer=track_monomer_dimer
+                )
             finally:
                 sim.tqdm = orig_tqdm
             
-            return temp_results, failed_indices
+            return totals_df, mon_dim_df, failed_indices
         
         for param_idx in param_indices:
             param_subset = fos_data[fos_data['param_index'] == param_idx]
@@ -78,10 +81,15 @@ def run_simulations_with_duplicates(fos_data, param_indices):
             
             for init_idx in init_cond_indices:
                 try:
-                    temp_results, failed_indices = run_single_simulation(param_idx, init_idx, fos_data)
+                    totals_df, mon_dim_df, failed_indices = run_single_simulation(
+                        param_idx, init_idx, fos_data
+                    )
                     
-                    if not temp_results.empty:
-                        all_results.append(temp_results)
+                    if not totals_df.empty:
+                        all_results_totals.append(totals_df)
+                        if track_monomer_dimer and mon_dim_df is not None:
+                            all_results_monomers_dimers.append(mon_dim_df)
+                            
                     if failed_indices:
                         all_failed_indices.extend(failed_indices)
                 except Exception as e:
@@ -90,8 +98,13 @@ def run_simulations_with_duplicates(fos_data, param_indices):
                 
                 pbar.update(1)
     
-    final_results = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
-    return final_results, list(set(all_failed_indices))
+    final_results_totals = pd.concat(all_results_totals, ignore_index=True) if all_results_totals else pd.DataFrame()
+    
+    if track_monomer_dimer and all_results_monomers_dimers:
+        final_results_mon_dim = pd.concat(all_results_monomers_dimers, ignore_index=True)
+        return final_results_totals, final_results_mon_dim, list(set(all_failed_indices))
+    else:
+        return final_results_totals, None, list(set(all_failed_indices))
 
 def reorder_for_simulation(df):
     """
@@ -121,7 +134,7 @@ def reorder_for_simulation(df):
     return df[final_order].copy()
 
 class PerturbationPipeline:
-    def __init__(self, initial_data):
+    def __init__(self, initial_data, track_monomer_dimer=False):
         """
         Initialize the perturbation pipeline with initial data
         
@@ -133,6 +146,7 @@ class PerturbationPipeline:
         self.initial_data = initial_data.copy()
         self.current_data = initial_data.copy()
         self.failed_indices = set()
+        self.track_monomer_dimer = track_monomer_dimer 
         
         # Define standard column mappings
         self.STATE_MAPPINGS = {
@@ -446,6 +460,45 @@ class PerturbationPipeline:
             rename_dict[old_name] = f"{new_name} {suffix}"
             
         return data.rename(columns=rename_dict)
+    
+    def _update_monomer_dimer_names(self, data, perturbation_info):
+        """
+        Update monomer and dimer column names based on perturbation sequence
+        Similar to _update_state_names but for monomers/dimers
+        """
+        rename_dict = {}
+        perturbation_type = perturbation_info['type']
+        target_gene = perturbation_info['gene']
+        
+        # Define monomer and dimer columns
+        monomer_cols = ['fos_monomer', 'jun_monomer', 'fra1_monomer', 'fra2_monomer', 'jund_monomer']
+        dimer_cols = ['junfos', 'junfra1', 'junfra2', 'junjund', 'junjun', 
+                    'jundfos', 'jundfra1', 'jundfra2', 'jundjund']
+        
+        all_cols = monomer_cols + dimer_cols
+        
+        # Check if this is a subsequent perturbation after a knockout
+        if self.perturbation_history and self.perturbation_history[-1]['type'] == 'ko' and perturbation_type in ['kd', 'oe']:
+            prev_pert = self.perturbation_history[-1]
+            
+            if perturbation_type == 'kd':
+                suffix = f"post {prev_pert['gene']}KO {target_gene}KD"
+            elif perturbation_type == 'oe':
+                suffix = f"post {prev_pert['gene']}KO {target_gene}OE"
+        else:
+            # First perturbation or not following a knockout
+            if perturbation_type == 'ko':
+                suffix = f"post {target_gene}KO"
+            elif perturbation_type == 'kd':
+                suffix = f"post {target_gene}KD"
+            elif perturbation_type == 'oe':
+                suffix = f"post {target_gene}OE"
+        
+        # Create rename dictionary
+        for col in all_cols:
+            rename_dict[col] = f"{col} {suffix}"
+        
+        return data.rename(columns=rename_dict)
 
     def perform_knockout(self, target_gene=None, ko_value=0.0001, ko_method='set', 
                     ko_multiplier=0.5, custom_params=None,param_multipliers=None):
@@ -525,36 +578,46 @@ class PerturbationPipeline:
         
         # Run simulations
         print("\n----- RUNNING SIMULATION -----")
-        results_df, failed_indices = run_simulations_with_duplicates(
-            perturbed_data, 
-            perturbed_data['param_index'].unique()
-        )
+        results_totals, results_mon_dim, failed_indices = run_simulations_with_duplicates(
+        perturbed_data, 
+        perturbed_data['param_index'].unique(),
+        track_monomer_dimer=self.track_monomer_dimer
+)
         
         # Debug: Check values after simulation
         print("\n----- AFTER SIMULATION -----")
         for param in ko_params:
-            if param in results_df.columns:
-                print(f"{param} exists in results_df, sample value: {results_df[param].iloc[0] if not results_df.empty else 'N/A'}")
+            if param in results_totals.columns:
+                print(f"{param} exists in results_totals, sample value: {results_totals[param].iloc[0] if not results_totals.empty else 'N/A'}")
             else:
-                print(f"{param} does not exist in results_df columns!")
+                print(f"{param} does not exist in results_totals columns!")
         
         # Handle failed simulations and log the number of failures
-        initial_size = len(results_df)
+        initial_size = len(results_totals)
         self._handle_failed_simulations(failed_indices)
         
-        # Remove failed simulations from results_df
-        results_df = results_df[~results_df['param_index'].isin(self.failed_indices)]
-        logging.info(f"Removed {initial_size - len(results_df)} failed simulations")
+        # Remove failed simulations from results_totals
+        results_totals = results_totals[~results_totals['param_index'].isin(self.failed_indices)]
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            results_mon_dim = results_mon_dim[~results_mon_dim['param_index'].isin(self.failed_indices)]
+
+        logging.info(f"Removed {initial_size - len(results_totals)} failed simulations")
+
         
         # Update current data with new steady states
-        results_df = self._update_state_names(
-            results_df, 
+        results_totals = self._update_state_names(
+            results_totals, 
             {'type': 'ko', 'gene': target_name}
         )
-        
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            results_mon_dim = self._update_monomer_dimer_names(
+                results_mon_dim,
+                {'type': 'ko', 'gene': target_name}
+            )
+
         # Debug: Check columns before merge
         print("\n----- COLUMNS BEFORE MERGE -----")
-        print(f"Results columns: {results_df.columns.tolist()}")
+        print(f"Results columns: {results_totals.columns.tolist()}")
         print(f"Initial data columns: {self.initial_data.columns.tolist()}")
         
         # Merge with full parameter set from initial data
@@ -562,7 +625,7 @@ class PerturbationPipeline:
                         if c not in self.STATE_MAPPINGS['input'] + ['FOS_category']]
         print(f"Param columns for merge: {param_columns}")
         
-        results_df = results_df.merge(
+        results_totals = results_totals.merge(
             self.initial_data[param_columns],
             on=['param_index','init_cond_index'],
             how='left', suffixes=("", "_old")
@@ -571,8 +634,8 @@ class PerturbationPipeline:
         # Debug: Check values after merge
         print("\n----- AFTER MERGE -----")
         for param in ko_params:
-            if param in results_df.columns:
-                print(f"{param} exists after merge, sample value: {results_df[param].iloc[0] if not results_df.empty else 'N/A'}")
+            if param in results_totals.columns:
+                print(f"{param} exists after merge, sample value: {results_totals[param].iloc[0] if not results_totals.empty else 'N/A'}")
             else:
                 print(f"{param} does not exist after merge!")
         
@@ -580,9 +643,9 @@ class PerturbationPipeline:
         print("\n----- APPLYING FINAL PARAMETER VALUES -----")
         for p in ko_params:
             if ko_method == 'set':
-                # e.g. results_df["(basal_fos).v"] = 0.0001
+                # e.g. results_totals["(basal_fos).v"] = 0.0001
                 print(f"Setting {p} to fixed value {ko_value}")
-                results_df[p] = ko_value
+                results_totals[p] = ko_value
             else:  # ko_method == 'multiply'
                 # Get the multiplier for this parameter
                 mult = param_multipliers.get(p, ko_multiplier) if param_multipliers else ko_multiplier
@@ -592,47 +655,52 @@ class PerturbationPipeline:
                 orig_values = self.initial_data.set_index(['param_index', 'init_cond_index'])[p].to_dict()
                 
                 # Direct assignment using at for guaranteed precision
-                for idx, row in results_df.iterrows():
+                for idx, row in results_totals.iterrows():
                     key = (row['param_index'], row['init_cond_index'])
                     orig_val = orig_values.get(key, 0)
                     new_val = orig_val * mult
-                    results_df.at[idx, p] = new_val
+                    results_totals.at[idx, p] = new_val
                     
                     # Only print first row for debugging
                     if idx == 0:
                         print(f"  {p}: {orig_val} × {mult} = {new_val}")
                 
             old_col = p + "_old"
-            if old_col in results_df.columns:
-                results_df.drop(columns=[old_col], inplace=True)
+            if old_col in results_totals.columns:
+                results_totals.drop(columns=[old_col], inplace=True)
         
         # Debug: Check final values
         print("\n----- FINAL PARAMETER VALUES -----")
         for param in ko_params:
-            if param in results_df.columns:
-                print(f"{param} final value: {results_df[param].iloc[0] if not results_df.empty else 'N/A'}")
+            if param in results_totals.columns:
+                print(f"{param} final value: {results_totals[param].iloc[0] if not results_totals.empty else 'N/A'}")
             else:
                 print(f"{param} missing from final results!")
         
         # Verify results are not empty
-        if len(results_df) == 0:
+        if len(results_totals) == 0:
             raise ValueError("No valid results after merging in KO step.")
-        
-        # Save to history with enhanced information
-        self.perturbation_history.append({
+
+        history_entry = {
             'type': 'ko',
             'gene': target_name,
-            'results': results_df,
+            'results': results_totals,
             'ko_params': ko_params,
             'ko_method': ko_method,
             'ko_value': ko_value if ko_method == 'set' else None,
             'ko_multiplier': ko_multiplier if ko_method == 'multiply' else None,
             'param_multipliers': param_multipliers.copy() if param_multipliers else None
-        })
+        }
+
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            history_entry['results_monomers_dimers'] = results_mon_dim
         
-        # Set self.current_data to results_df,
+        # Save to history with enhanced information
+        self.perturbation_history.append(history_entry)
+        
+        # Set self.current_data to results_totals,
         # BUT also rename back to fos,jun,fra1,fra2,jund so next step sees them:
-        self.current_data = self._rename_back_to_input(results_df, target_name, is_ko=True)
+        self.current_data = self._rename_back_to_input(results_totals, target_name, is_ko=True)
         
         # Reorder so columns 17..21 are fos,jun,fra1,fra2,jund
         self.current_data = reorder_for_simulation(self.current_data)
@@ -647,7 +715,10 @@ class PerturbationPipeline:
         
         print("----- KNOCKOUT COMPLETE -----\n")
         
-        return results_df
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            return results_totals, results_mon_dim
+        else:
+            return results_totals
         
     
 
@@ -721,20 +792,26 @@ class PerturbationPipeline:
             )
         else:
             raise ValueError(f"Unknown knockdown approach: {kd_approach}. Use 'beta', 'truncnorm', or 'direct'.")
-        # Run simulations
-        results_df, failed_indices = run_simulations_with_duplicates(
+        
+         # Run simulations - NOW RETURNS 3 VALUES
+        results_totals, results_mon_dim, failed_indices = run_simulations_with_duplicates(
             perturbed_data,
-            perturbed_data['param_index'].unique()
+            perturbed_data['param_index'].unique(),
+            track_monomer_dimer=self.track_monomer_dimer
         )
         
         # Handle failed simulations
         self._handle_failed_simulations(failed_indices)
         
-        # Remove failed simulations from results_df
-        results_df = results_df[~results_df['param_index'].isin(self.failed_indices)]
-        
+        # Remove failed simulations from results_totals
+        # Remove failed simulations from both dataframes
+        results_totals = results_totals[~results_totals['param_index'].isin(self.failed_indices)]
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            results_mon_dim = results_mon_dim[~results_mon_dim['param_index'].isin(self.failed_indices)]
+            
         # Add the knockdown multiplier to results
-        results_df = results_df.merge(
+         # Add the knockdown multiplier to results_totals
+        results_totals = results_totals.merge(
             perturbed_data[['param_index', 'init_cond_index', 'knockdown_multiplier']],
             on=['param_index', 'init_cond_index'],
             how='left'
@@ -744,50 +821,69 @@ class PerturbationPipeline:
         if self.perturbation_history and self.perturbation_history[-1]['type'] == 'ko':
             # If there was a previous KO, include it in the state names
             prev_gene = self.perturbation_history[-1]['gene']
-            results_df = self._update_state_names(
-                results_df,
+            results_totals = self._update_state_names(
+                results_totals,
                 {'type': 'kd', 'gene': target_gene, 'prev_ko': prev_gene}
             )
+            # Update monomer/dimer names if tracking
+            if self.track_monomer_dimer and results_mon_dim is not None:
+                results_mon_dim = self._update_monomer_dimer_names(
+                    results_mon_dim,
+                    {'type': 'kd', 'gene': target_gene}
+                )
         else:
-            results_df = self._update_state_names(
-                results_df,
+            results_totals = self._update_state_names(
+                results_totals,
                 {'type': 'kd', 'gene': target_gene}
             )
+            # Update monomer/dimer names if tracking
+            if self.track_monomer_dimer and results_mon_dim is not None:
+                results_mon_dim = self._update_monomer_dimer_names(
+                    results_mon_dim,
+                    {'type': 'kd', 'gene': target_gene}
+                )
         
         # 5) Keep param columns from current_data but preserve updated KD param
         param_columns = [c for c in self.current_data.columns
                          if c not in self.STATE_MAPPINGS['input'] + ['FOS_category']]
-        results_df = results_df.merge(
+        results_totals = results_totals.merge(
             self.current_data[param_columns],
             on=['param_index','init_cond_index'],
             how='left', suffixes=("", "_old")
         )
         for p in kd_params:
-            # E.g. results_df["(basal_jund).v"] = results_df["(basal_jund).v"] from perturbed_data
+            # E.g. results_totals["(basal_jund).v"] = results_totals["(basal_jund).v"] from perturbed_data
             updated_vals = perturbed_data.set_index(['param_index','init_cond_index'])[p].to_dict()
-            results_df[p] = results_df.apply(
+            results_totals[p] = results_totals.apply(
                 lambda row: updated_vals.get((row['param_index'], row['init_cond_index']), np.nan),
                 axis=1
             )
             old_col = p + "_old"
-            if old_col in results_df.columns:
-                results_df.drop(columns=[old_col], inplace=True)
+            if old_col in results_totals.columns:
+                results_totals.drop(columns=[old_col], inplace=True)
         
         # 6) Save to history
-        self.perturbation_history.append({
-            'type': 'kd',
-            'gene': target_gene,
-            'kd_approach': kd_approach,
-            'results': results_df
-        })
+        history_entry = {
+        'type': 'kd',
+        'gene': target_gene,
+        'kd_approach': kd_approach,
+        'results': results_totals
+        }
+    
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            history_entry['results_monomers_dimers'] = results_mon_dim
         
+        self.perturbation_history.append(history_entry)
         # 7) Set self.current_data for next step,
         # rename back to fos,jun,fra1,fra2,jund,
         # reorder so run_simulations() can pick them
-        self.current_data = self._rename_back_to_input(results_df, target_gene, is_ko=False)
+        self.current_data = self._rename_back_to_input(results_totals, target_gene, is_ko=False)
         self.current_data = reorder_for_simulation(self.current_data)
         
-        return results_df
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            return results_totals, results_mon_dim
+        else:
+            return results_totals
     
     def perform_overexpression(self, target_gene, oe_method='beta', beta_a=8.0, beta_b=2.5, max_mult=2.0, set_mult=2.0, custom_params=None):
         """
@@ -884,19 +980,22 @@ class PerturbationPipeline:
                 print(f"Warning: Parameter {param} not found in current data, skipping")
         
         # Run simulations with the perturbed parameters
-        results_df, failed_indices = run_simulations_with_duplicates(
+        results_totals, results_mon_dim, failed_indices = run_simulations_with_duplicates(
             perturbed_data,
-            perturbed_data['param_index'].unique()
+            perturbed_data['param_index'].unique(),
+            track_monomer_dimer=self.track_monomer_dimer
         )
         
         # Handle failed simulations
         self._handle_failed_simulations(failed_indices)
         
         # Remove failed simulations from results
-        results_df = results_df[~results_df['param_index'].isin(self.failed_indices)]
+        results_totals = results_totals[~results_totals['param_index'].isin(self.failed_indices)]
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            results_mon_dim = results_mon_dim[~results_mon_dim['param_index'].isin(self.failed_indices)]
         
         # Add the overexpression multiplier to results
-        results_df = results_df.merge(
+        results_totals = results_totals.merge(
             perturbed_data[['param_index', 'init_cond_index', 'overexpression_multiplier']],
             on=['param_index', 'init_cond_index'],
             how='left'
@@ -906,21 +1005,33 @@ class PerturbationPipeline:
         if self.perturbation_history and self.perturbation_history[-1]['type'] == 'ko':
             # If there was a previous KO, include it in the state names
             prev_gene = self.perturbation_history[-1]['gene']
-            results_df = self._update_state_names(
-                results_df,
+            results_totals = self._update_state_names(
+                results_totals,
                 {'type': 'oe', 'gene': target_gene, 'prev_ko': prev_gene}
             )
+            # Update monomer/dimer names if tracking
+            if self.track_monomer_dimer and results_mon_dim is not None:
+                results_mon_dim = self._update_monomer_dimer_names(
+                    results_mon_dim,
+                    {'type': 'oe', 'gene': target_gene}
+                )
         else:
-            results_df = self._update_state_names(
-                results_df,
+            results_totals = self._update_state_names(
+                results_totals,
                 {'type': 'oe', 'gene': target_gene}
             )
+            # Update monomer/dimer names if tracking
+            if self.track_monomer_dimer and results_mon_dim is not None:
+                results_mon_dim = self._update_monomer_dimer_names(
+                    results_mon_dim,
+                    {'type': 'oe', 'gene': target_gene}
+                )
         
         # Keep parameter columns from current_data but preserve updated OE params
         param_columns = [c for c in self.current_data.columns
                         if c not in self.STATE_MAPPINGS['input'] + ['FOS_category']]
         
-        results_df = results_df.merge(
+        results_totals = results_totals.merge(
             self.current_data[param_columns],
             on=['param_index', 'init_cond_index'],
             how='left', suffixes=("", "_old")
@@ -930,19 +1041,19 @@ class PerturbationPipeline:
         for p in oe_params:
             if p in perturbed_data.columns:
                 updated_vals = perturbed_data.set_index(['param_index', 'init_cond_index'])[p].to_dict()
-                results_df[p] = results_df.apply(
+                results_totals[p] = results_totals.apply(
                     lambda row: updated_vals.get((row['param_index'], row['init_cond_index']), np.nan),
                     axis=1
                 )
                 old_col = p + "_old"
-                if old_col in results_df.columns:
-                    results_df.drop(columns=[old_col], inplace=True)
+                if old_col in results_totals.columns:
+                    results_totals.drop(columns=[old_col], inplace=True)
         
         # Save to history with appropriate method information
         history_entry = {
             'type': 'oe',
             'gene': target_gene,
-            'results': results_df,
+            'results': results_totals,
             'oe_params': oe_params,
             'oe_method': oe_method
         }
@@ -957,11 +1068,15 @@ class PerturbationPipeline:
             history_entry.update({
                 'set_mult': set_mult
             })
+
+            # Add monomer/dimer results to history if tracking
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            history_entry['results_monomers_dimers'] = results_mon_dim
         
         self.perturbation_history.append(history_entry)
         
         # Set current_data for next step
-        self.current_data = self._rename_back_to_input(results_df, target_gene, is_ko=False)
+        self.current_data = self._rename_back_to_input(results_totals, target_gene, is_ko=False)
         self.current_data = reorder_for_simulation(self.current_data)
         
         # Calculate and report actual mean overexpression
@@ -972,7 +1087,10 @@ class PerturbationPipeline:
         
         logging.info(f"Overexpression of {target_gene} complete. Mean increase: {mean_oe*100:.1f}%")
         
-        return results_df
+        if self.track_monomer_dimer and results_mon_dim is not None:
+            return results_totals, results_mon_dim
+        else:
+            return results_totals
     
     def _rename_back_to_input(self, df, gene, is_ko):
         """
@@ -1052,11 +1170,18 @@ class PerturbationPipeline:
         self.current_data = self.perturbation_history[last_ko_idx]['results'].copy()
     
     def get_final_results(self):
-        """Generate final merged dataset with all states and parameters"""
+        """Generate final merged dataset(s) with all states and parameters"""
         if not self.perturbation_history:
-            return self.initial_data
-                
+            if self.track_monomer_dimer:
+                return self.initial_data, pd.DataFrame()
+            else:
+                return self.initial_data
+        
         final_data = self.initial_data.copy()
+        
+        # Initialize monomer/dimer dataframe if tracking
+        if self.track_monomer_dimer:
+            final_mon_dim = self.initial_data[['param_index', 'init_cond_index']].copy()
         
         # Keep track of perturbed parameters
         perturbed_params = set()
@@ -1116,6 +1241,23 @@ class PerturbationPipeline:
                         key = (row['param_index'], row['init_cond_index'])
                         if key in param_values:
                             final_data.at[idx, param] = param_values[key]
+            
+            # Merge monomers/dimers if available
+            if self.track_monomer_dimer and 'results_monomers_dimers' in perturbation:
+                mon_dim_to_merge = perturbation['results_monomers_dimers'].copy()
+                
+                merge_columns = ['param_index', 'init_cond_index']
+                # Add all monomer/dimer columns
+                mon_dim_cols = [col for col in mon_dim_to_merge.columns 
+                            if col not in ['param_index', 'init_cond_index']]
+                merge_columns.extend(mon_dim_cols)
+                
+                final_mon_dim = pd.merge(
+                    final_mon_dim,
+                    mon_dim_to_merge[merge_columns],
+                    on=['param_index', 'init_cond_index'],
+                    how='inner'
+                )
         
         # Maintain consistent column ordering and remove any duplicates
         ordered_columns = ['param_index', 'init_cond_index']
@@ -1139,11 +1281,15 @@ class PerturbationPipeline:
         ordered_columns = [col for col in ordered_columns if col in final_data.columns]
         final_data = final_data[ordered_columns]
         
-        return final_data
+        if self.track_monomer_dimer:
+            return final_data, final_mon_dim
+        else:
+            return final_data
 
     def save_results(self, cell_line, version, beta_a=None, beta_b=None, output_dir='processed_simulations'):
         """
         Save results with detailed filename including perturbation information
+        If track_monomer_dimer is True, saves two files
         """
         from datetime import datetime
         
@@ -1161,7 +1307,6 @@ class PerturbationPipeline:
                     # Check if we used custom param multipliers
                     if p.get('param_multipliers'):
                         # For custom multipliers, use a shorthand representation
-                        # Format: FOS_KO_custom_v0.5_beta0.1 (for (basal_fos).v=0.5, (jun_by_junfos).beta=0.1)
                         mult_info = []
                         for param, mult in p.get('param_multipliers').items():
                             # Extract just the last part of the parameter name
@@ -1198,12 +1343,21 @@ class PerturbationPipeline:
             # This works for both KD and OE since both use beta distribution
             param_str = f'_a_{beta_a:.2f}_b_{beta_b:.2f}'
         
-        # Construct filename
-        filename = f'{date_str}_{cell_line}_{perturbation_str}_steady_states_results{param_str}_{version}.csv'
+        # Get final results
+        if self.track_monomer_dimer:
+            results_totals, results_mon_dim = self.get_final_results()
+        else:
+            results_totals = self.get_final_results()
         
-        # Get final results and save
-        results = self.get_final_results()
-        filepath = os.path.join(output_dir, filename)
-        results.to_csv(filepath, index=False)
+        # Save totals
+        filename_totals = f'{date_str}_{cell_line}_{perturbation_str}_steady_states_totals{param_str}_{version}.csv'
+        filepath_totals = os.path.join(output_dir, filename_totals)
+        results_totals.to_csv(filepath_totals, index=False)
+        logging.info(f'Totals results saved to: {filepath_totals}')
         
-        logging.info(f'Results saved to: {filepath}')
+        # Save monomers/dimers if tracking
+        if self.track_monomer_dimer:
+            filename_mon_dim = f'{date_str}_{cell_line}_{perturbation_str}_steady_states_monomers_dimers{param_str}_{version}.csv'
+            filepath_mon_dim = os.path.join(output_dir, filename_mon_dim)
+            results_mon_dim.to_csv(filepath_mon_dim, index=False)
+            logging.info(f'Monomers/Dimers results saved to: {filepath_mon_dim}')

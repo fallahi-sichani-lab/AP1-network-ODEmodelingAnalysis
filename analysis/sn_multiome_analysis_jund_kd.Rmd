@@ -1,0 +1,1666 @@
+---
+title: "Multiome Analysis: JUND KD Only (NTC + JUND_KD)"
+author: "Yonatan Degefu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 6)
+```
+
+# Overview
+
+Re-analysis of the 10x Multiome dataset using only **3 samples** (NTC_rep1,
+NTC_rep2, JUND_KD), so that JUNB_KD does not influence WNN clustering, Tsoi
+labeling, or any downstream analysis. Reuses per-sample checkpoints from the
+full 4-sample pipeline to skip redundant computation.
+
+
+# 1. Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(UCell)
+  library(EnsDb.Hsapiens.v86)
+  library(GenomicRanges)
+  library(GenomeInfoDb)
+  library(Rsamtools)
+  library(SingleCellExperiment)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+  library(tibble)
+})
+
+set.seed(42)
+options(future.globals.maxSize = 8000 * 1024^2)
+
+run_opts <- list(
+  tss_fast = TRUE,
+  use_checkpoints = TRUE,
+  force_rerun = FALSE
+)
+```
+
+```{r paths}
+base_path <- "/Volumes/FallahiLab/Maize-Data/Data/Magda_Bujnowska/20240530_multiome_analysis/20240720_Multiome_analysis"
+tsoi_path <- "/Volumes/FallahiLab/Maize-Data/Data/Yonatan_Degefu/ap1_multiomic_analysis/data/processed/curated_gene_sets/Tsoi_et_al_gene_list.csv"
+
+# if you want to rerun and reload the merged file uncomment this
+# merged <- readRDS(
+#   "analysis/sc_rna_atac_analysis/results/jund_only/merged_multiome_jund_only.rds"
+# )
+
+
+# Output goes to a separate subdirectory so nothing overwrites the 4-sample results
+output_dir <- "/Volumes/FallahiLab/Maize-Data/Data/Yonatan_Degefu/ap1_multiomic_analysis/analysis/sc_rna_atac_analysis/results/jund_only"
+fig_dir <- file.path(output_dir, "figures")
+qc_dir <- file.path(output_dir, "qc")
+tbl_dir <- file.path(output_dir, "tables")
+ckpt_dir <- file.path(output_dir, "checkpoints")
+
+for (d in c(output_dir, fig_dir, qc_dir, tbl_dir, ckpt_dir)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Path to the EXISTING 4-sample checkpoints (we reuse these)
+shared_ckpt <- "/Volumes/FallahiLab/Maize-Data/Data/Yonatan_Degefu/ap1_multiomic_analysis/analysis/sc_rna_atac_analysis/results/checkpoints"
+
+# 3-sample subset
+sample_names <- c("NTC_rep1", "NTC_rep2", "JUND_KD")
+sample_dirs <- c(
+  NTC_rep1 = file.path(base_path, "sample1_count_output/outs"),
+  NTC_rep2 = file.path(base_path, "sample2_count_output/outs"),
+  JUND_KD = file.path(base_path, "sample4_count_output/outs")
+)
+
+condition_colors <- c(
+  NTC_rep1 = "#5A5A5A",
+  NTC_rep2 = "#AAAAAA",
+  JUND_KD = "#D62728"
+)
+
+
+tsoi_colors_7 <- c(
+  Melanocytic = "#2E5A88",
+  Transitory_Melanocytic = "#5B8DBF",
+  Transitory = "#F4A261",
+  NC_Transitory = "#A8D08D",
+  NeuralCrest = "#4F8C5A",
+  Undiff_NeuralCrest = "#D87575",
+  Undifferentiated = "#A8324A"
+)
+
+tsoi_colors_4 <- c(
+  Melanocytic = "#4E79A7",
+  Transitory = "#F28E2B",
+  NeuralCrest = "#59A14F",
+  Undifferentiated = "#E15759",
+  `Melanocytic (low conf)` = "#A8C2D8",
+  `Transitory (low conf)` = "#F8C994",
+  `NeuralCrest (low conf)` = "#AECEA9",
+  `Undifferentiated (low conf)` = "#F0AAAB"
+)
+```
+
+```{r qc-thresholds}
+qc_thresholds <- list(
+  # RNA
+  nFeature_RNA_min       = 200,
+  nFeature_RNA_max       = 8000,
+  nCount_RNA_max         = 30000,
+  percent_mt_max         = 15,
+  # ATAC
+  nCount_ATAC_min        = 3000,
+  nCount_ATAC_max        = 100000,
+  pct_reads_in_peaks_min = 15,
+  blacklist_ratio_max    = 0.05,
+  TSS_enrichment_min     = 2,
+  nucleosome_signal_max  = 4,
+  # Doublets
+  doublet_remove         = TRUE
+)
+```
+
+# 2. Load from existing checkpoints
+
+Per-sample objects (RNA + doublet calls) and ATAC quantification were computed
+in the full 4-sample pipeline. We load those and drop JUNB_KD.
+
+```{r load-checkpoints}
+per_sample <- readRDS(file.path(shared_ckpt, "02_per_sample_with_doublets.rds"))
+per_sample[["JUNB_KD"]] <- NULL
+cat("Loaded per-sample objects for:", paste(names(per_sample), collapse = ", "), "\n")
+sapply(per_sample, ncol)
+
+atac_quant <- readRDS(file.path(shared_ckpt, "03_atac_quant.rds"))
+atac_quant$atac_counts_list[["JUNB_KD"]] <- NULL
+# Fragment objects are an unnamed list ordered: NTC_rep1, NTC_rep2, JUNB_KD, JUND_KD
+# Keep indices 1, 2, 4 (drop JUNB_KD at index 3)
+atac_quant$frag_objs <- atac_quant$frag_objs[c(1, 2, 4)]
+cat("ATAC counts samples:", paste(names(atac_quant$atac_counts_list), collapse = ", "), "\n")
+```
+
+# 3. Doublet summary
+
+```{r doublet-summary}
+doublet_summary <- data.frame(
+  sample   = sample_names,
+  n_cells  = sapply(per_sample, ncol),
+  n_doublet = sapply(per_sample, function(o) sum(o$scDblFinder_class == "doublet")),
+  pct_doublet = sapply(per_sample, function(o)
+    round(100 * mean(o$scDblFinder_class == "doublet"), 2))
+)
+print(doublet_summary)
+write.csv(doublet_summary, file.path(qc_dir, "doublet_summary.csv"), row.names = FALSE)
+```
+
+# 4. Diagnostic QC plots (no filtering yet)
+
+```{r qc-build-long-df}
+qc_long <- bind_rows(lapply(per_sample, function(o) {
+  o@meta.data %>%
+    tibble::rownames_to_column("cell") %>%
+    dplyr::select(cell, orig.ident,
+           nFeature_RNA, nCount_RNA, percent.mt, percent.ribo,
+           atac_fragments, atac_peak_region_fragments,
+           pct_reads_in_peaks_arc, scDblFinder_score, scDblFinder_class)
+})) %>%
+  mutate(orig.ident = factor(orig.ident, levels = sample_names))
+```
+
+```{r qc-violin-plots, fig.width=12, fig.height=10}
+make_violin <- function(df, ycol, ylab, hlines = NULL, log_y = FALSE) {
+  p <- ggplot(df, aes(orig.ident, .data[[ycol]], fill = orig.ident)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    geom_jitter(width = 0.15, size = 0.15, alpha = 0.2) +
+    scale_fill_manual(values = condition_colors) +
+    labs(x = NULL, y = ylab) +
+    theme_classic(base_size = 12) +
+    theme(legend.position = "none")
+  if (log_y) p <- p + scale_y_log10()
+  if (!is.null(hlines)) {
+    p <- p + geom_hline(yintercept = hlines, linetype = "dashed",
+                        color = "red", alpha = 0.7)
+  }
+  p
+}
+
+rna_qc_plots <- list(
+  make_violin(qc_long, "nFeature_RNA", "nFeature_RNA",
+              c(qc_thresholds$nFeature_RNA_min, qc_thresholds$nFeature_RNA_max)),
+  make_violin(qc_long, "nCount_RNA", "nCount_RNA (log)",
+              c(qc_thresholds$nCount_RNA_max), log_y = TRUE),
+  make_violin(qc_long, "percent.mt", "% mitochondrial",
+              c(qc_thresholds$percent_mt_max)),
+  make_violin(qc_long, "percent.ribo", "% ribosomal"),
+  make_violin(qc_long, "scDblFinder_score", "doublet score")
+)
+
+rna_panel <- wrap_plots(rna_qc_plots, ncol = 3)
+print(rna_panel)
+ggsave(file.path(qc_dir, "QC_pre_filter_violins.pdf"),
+       rna_panel, width = 12, height = 8)
+```
+
+```{r qc-scatter-tss-vs-frags, fig.width=10, fig.height=4}
+p_scatter <- ggplot(qc_long, aes(nCount_RNA, scDblFinder_score, color = scDblFinder_class)) +
+  geom_point(size = 0.3, alpha = 0.3) +
+  facet_wrap(~orig.ident, ncol = 3) +
+  scale_x_log10() +
+  labs(title = "Doublet score vs library size") +
+  theme_classic(base_size = 11)
+print(p_scatter)
+ggsave(file.path(qc_dir, "QC_doublet_scatter.pdf"), p_scatter, width = 10, height = 4)
+```
+
+# 5. Apply RNA QC + doublet filter
+
+```{r apply-rna-filter}
+valid_barcodes <- list()
+for (s in sample_names) {
+  obj <- per_sample[[s]]
+  keep <- obj$nFeature_RNA >= qc_thresholds$nFeature_RNA_min &
+          obj$nFeature_RNA <= qc_thresholds$nFeature_RNA_max &
+          obj$nCount_RNA   <= qc_thresholds$nCount_RNA_max &
+          obj$percent.mt   <= qc_thresholds$percent_mt_max
+  if (qc_thresholds$doublet_remove) {
+    keep <- keep & obj$scDblFinder_class != "doublet"
+  }
+  valid_barcodes[[s]] <- colnames(obj)[keep]
+  per_sample[[s]] <- subset(obj, cells = valid_barcodes[[s]])
+  cat(s, ":", length(valid_barcodes[[s]]), "/", ncol(obj), "cells kept\n")
+}
+
+pre_filter_counts <- doublet_summary$n_cells  # from section 3, before any filtering
+rna_qc_summary <- data.frame(
+  sample      = sample_names,
+  pre_filter  = pre_filter_counts,
+  post_filter = sapply(per_sample, ncol)
+)
+rna_qc_summary$pct_kept <- round(100 * rna_qc_summary$post_filter /
+                                   rna_qc_summary$pre_filter, 1)
+print(rna_qc_summary)
+write.csv(rna_qc_summary, file.path(qc_dir, "rna_qc_summary.csv"), row.names = FALSE)
+```
+
+## 5b. Post-filter QC violins
+
+```{r qc-post-filter-violins, fig.width=12, fig.height=8}
+qc_long_post <- bind_rows(lapply(sample_names, function(s) {
+  per_sample[[s]]@meta.data %>%
+    tibble::rownames_to_column("cell") %>%
+    dplyr::select(cell, orig.ident, nFeature_RNA, nCount_RNA,
+                  percent.mt, percent.ribo)
+})) %>%
+  mutate(orig.ident = factor(orig.ident, levels = sample_names))
+
+post_plots <- list(
+  make_violin(qc_long_post, "nFeature_RNA", "nFeature_RNA (post-filter)"),
+  make_violin(qc_long_post, "nCount_RNA", "nCount_RNA (post-filter, log)", log_y = TRUE),
+  make_violin(qc_long_post, "percent.mt", "% mito (post-filter)"),
+  make_violin(qc_long_post, "percent.ribo", "% ribo (post-filter)")
+)
+post_panel <- wrap_plots(post_plots, ncol = 2)
+print(post_panel)
+ggsave(file.path(qc_dir, "QC_post_filter_violins.pdf"),
+       post_panel, width = 10, height = 7)
+
+# Distribution summary
+post_dist <- qc_long_post %>%
+  group_by(orig.ident) %>%
+  summarise(
+    median_nFeat = median(nFeature_RNA),
+    median_nCount = median(nCount_RNA),
+    median_mt = round(median(percent.mt), 2),
+    .groups = "drop"
+  )
+print(post_dist)
+write.csv(post_dist, file.path(qc_dir, "rna_qc_post_filter_distribution.csv"),
+          row.names = FALSE)
+```
+
+# 8. Merge RNA and build ChromatinAssay
+
+ATAC quantification was loaded from checkpoint 03. The union peak set includes
+peaks from all 4 original samples (pragmatic approach — extra peaks are filtered
+by `min.cells = 10` in `CreateChromatinAssay`).
+
+```{r extract-atac}
+atac_counts_list <- atac_quant$atac_counts_list
+frag_objs        <- atac_quant$frag_objs
+
+sapply(atac_counts_list, ncol)
+
+shared_peaks <- Reduce(intersect, lapply(atac_counts_list, rownames))
+atac_counts_list <- lapply(atac_counts_list, function(m) m[shared_peaks, , drop = FALSE])
+atac_counts <- do.call(cbind, atac_counts_list)
+dim(atac_counts)
+```
+
+```{r merge-and-build-atac}
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+seqlevelsStyle(annotations) <- "UCSC"
+genome(annotations) <- "hg38"
+
+merged <- merge(per_sample[[1]],
+                y = per_sample[2:3],
+                add.cell.ids = sample_names,
+                project = "AP1_multiome_JUND")
+merged <- JoinLayers(merged)
+
+common_cells <- intersect(colnames(merged), colnames(atac_counts))
+length(common_cells)
+merged      <- subset(merged, cells = common_cells)
+atac_counts <- atac_counts[, common_cells]
+
+chrom_assay <- CreateChromatinAssay(
+  counts     = atac_counts,
+  sep        = c(":", "-"),
+  genome     = "hg38",
+  fragments  = unname(frag_objs),
+  annotation = annotations,
+  min.cells  = 10
+)
+merged[["ATAC"]] <- chrom_assay
+```
+
+# 8b. RNA gene-level detection diagnostic
+
+```{r gene-detection-distribution, fig.width=10, fig.height=4}
+DefaultAssay(merged) <- "RNA"
+rna_counts_full <- GetAssayData(merged, assay = "RNA", layer = "counts")
+
+gene_detection <- rowMeans(rna_counts_full > 0)
+
+gene_total <- Matrix::rowSums(rna_counts_full)
+gene_n_detected <- Matrix::rowSums(rna_counts_full > 0)
+gene_mean_when_detected <- ifelse(
+  gene_n_detected > 0,
+  gene_total / gene_n_detected,
+  0
+)
+names(gene_mean_when_detected) <- rownames(rna_counts_full)
+
+gene_qc_df <- data.frame(
+  gene = rownames(rna_counts_full),
+  pct_cells_detected = 100 * gene_detection,
+  mean_count_when_detected = gene_mean_when_detected
+)
+write.csv(gene_qc_df,
+          file.path(qc_dir, "rna_gene_detection_distribution.csv"),
+          row.names = FALSE)
+
+detection_bins <- data.frame(
+  threshold_pct_cells = c(0, 1, 5, 10, 25, 50),
+  n_genes_at_or_above = sapply(c(0, 1, 5, 10, 25, 50), function(t) {
+    sum(gene_qc_df$pct_cells_detected >= t)
+  })
+)
+detection_bins$pct_of_total <- round(
+  100 * detection_bins$n_genes_at_or_above / nrow(gene_qc_df), 1
+)
+print(detection_bins)
+write.csv(detection_bins,
+          file.path(qc_dir, "rna_gene_detection_bins.csv"),
+          row.names = FALSE)
+
+p_detect <- ggplot(gene_qc_df, aes(pct_cells_detected)) +
+  geom_histogram(bins = 80, fill = "#4E79A7", color = "white") +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "red") +
+  annotate("text", x = 12, y = Inf, label = "min.pct = 10%",
+           hjust = 0, vjust = 1.5, color = "red") +
+  scale_x_continuous(breaks = seq(0, 100, 10)) +
+  labs(
+    x = "% of cells detecting the gene",
+    y = "# genes",
+    title = "Per-gene detection rate (RNA assay, JUND-only subset)",
+    subtitle = paste0(
+      "Total genes in assay: ", nrow(gene_qc_df),
+      " | Genes detected in >=10% of cells: ",
+      sum(gene_qc_df$pct_cells_detected >= 10)
+    )
+  ) +
+  theme_classic(base_size = 12)
+
+p_when_detected <- ggplot(
+  subset(gene_qc_df, pct_cells_detected >= 10),
+  aes(mean_count_when_detected)
+) +
+  geom_histogram(bins = 80, fill = "#59A14F", color = "white") +
+  scale_x_log10() +
+  geom_vline(xintercept = 2, linetype = "dashed", color = "red") +
+  labs(
+    x = "Mean UMI count in cells that detect the gene (log10)",
+    y = "# genes",
+    title = "Expression level when detected (testable universe)",
+    subtitle = "Restricted to genes detected in >=10% of cells. Bar at count=2."
+  ) +
+  theme_classic(base_size = 12)
+
+print(p_detect + p_when_detected)
+ggsave(file.path(qc_dir, "QC_gene_detection.pdf"),
+       p_detect + p_when_detected, width = 12, height = 4)
+```
+
+# 9. ATAC QC
+
+```{r atac-qc-compute}
+DefaultAssay(merged) <- "ATAC"
+merged <- NucleosomeSignal(merged)
+merged <- TSSEnrichment(merged, fast = run_opts$tss_fast)
+merged$blacklist_ratio <- FractionCountsInRegion(
+  object  = merged,
+  assay   = "ATAC",
+  regions = blacklist_hg38_unified
+)
+merged$pct_reads_in_peaks <- 100 * merged$nCount_ATAC /
+  (merged$atac_fragments + 1e-9)
+```
+
+```{r atac-qc-diagnostic-plots, fig.width=14, fig.height=9}
+atac_qc_df <- merged@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  mutate(orig.ident = factor(orig.ident, levels = sample_names))
+
+atac_qc_plots <- list(
+  make_violin(atac_qc_df, "nCount_ATAC", "nCount_ATAC (log)",
+              c(qc_thresholds$nCount_ATAC_min, qc_thresholds$nCount_ATAC_max),
+              log_y = TRUE),
+  make_violin(atac_qc_df, "TSS.enrichment", "TSS enrichment",
+              c(qc_thresholds$TSS_enrichment_min)),
+  make_violin(atac_qc_df, "nucleosome_signal", "nucleosome signal",
+              c(qc_thresholds$nucleosome_signal_max)),
+  make_violin(atac_qc_df, "blacklist_ratio", "blacklist ratio",
+              c(qc_thresholds$blacklist_ratio_max)),
+  make_violin(atac_qc_df, "pct_reads_in_peaks", "% reads in peaks (Signac)",
+              c(qc_thresholds$pct_reads_in_peaks_min))
+)
+
+atac_qc_panel <- wrap_plots(atac_qc_plots, ncol = 3)
+print(atac_qc_panel)
+ggsave(file.path(qc_dir, "QC_atac_pre_filter_violins.pdf"),
+       atac_qc_panel, width = 14, height = 9)
+```
+
+```{r atac-fragment-histogram, fig.width=12, fig.height=4}
+p_frag <- FragmentHistogram(merged, group.by = "orig.ident")
+print(p_frag)
+ggsave(file.path(qc_dir, "QC_fragment_histogram.pdf"),
+       p_frag, width = 12, height = 4)
+```
+
+```{r atac-density-scatter, fig.width=10, fig.height=8}
+p_dens <- DensityScatter(merged, x = "nCount_ATAC", y = "TSS.enrichment",
+                         log_x = TRUE, quantiles = TRUE)
+print(p_dens)
+ggsave(file.path(qc_dir, "QC_density_TSS_vs_nCount_ATAC.pdf"),
+       p_dens, width = 8, height = 6)
+```
+
+# 10. Apply ATAC QC
+
+```{r atac-qc-filter}
+n_before <- ncol(merged)
+merged <- subset(merged,
+  subset = nCount_ATAC       > qc_thresholds$nCount_ATAC_min  &
+           nCount_ATAC       < qc_thresholds$nCount_ATAC_max  &
+           TSS.enrichment    > qc_thresholds$TSS_enrichment_min &
+           nucleosome_signal < qc_thresholds$nucleosome_signal_max &
+           blacklist_ratio   < qc_thresholds$blacklist_ratio_max  &
+           pct_reads_in_peaks > qc_thresholds$pct_reads_in_peaks_min
+)
+n_after <- ncol(merged)
+cat("ATAC QC: kept", n_after, "/", n_before, "cells\n")
+
+cell_counts_summary <- data.frame(
+  sample        = sample_names,
+  rna_post_qc   = sapply(sample_names, function(s) length(valid_barcodes[[s]])),
+  atac_quant    = sapply(sample_names, function(s) ncol(atac_counts_list[[s]])),
+  joint_post_qc = as.integer(table(factor(merged$orig.ident, levels = sample_names)))
+)
+cell_counts_summary$dropped <- cell_counts_summary$rna_post_qc - cell_counts_summary$joint_post_qc
+print(cell_counts_summary)
+write.csv(cell_counts_summary, file.path(qc_dir, "cell_counts_per_sample.csv"),
+          row.names = FALSE)
+```
+
+# 11. Normalize, embed (RNA + ATAC)
+
+```{r normalize-rna}
+DefaultAssay(merged) <- "RNA"
+merged <- NormalizeData(merged, verbose = FALSE)
+merged <- CellCycleScoring(merged,
+                           s.features   = cc.genes.updated.2019$s.genes,
+                           g2m.features = cc.genes.updated.2019$g2m.genes,
+                           set.ident = FALSE)
+merged$CC.Difference <- merged$S.Score - merged$G2M.Score
+
+merged <- SCTransform(merged,
+                      vars.to.regress = c("percent.mt", "CC.Difference"),
+                      verbose = FALSE)
+```
+
+```{r rna-pca-cluster}
+merged <- RunPCA(merged, npcs = 30, verbose = FALSE, seed.use = 42)
+
+dims_use <- 1:16
+merged <- FindNeighbors(merged, dims = dims_use, verbose = FALSE)
+
+leiden_ok <- tryCatch({
+  merged <- FindClusters(merged, algorithm = 4, resolution = 0.5,
+                         random.seed = 42, verbose = FALSE)
+  TRUE
+}, error = function(e) {
+  message("Leiden failed: ", conditionMessage(e),
+          " — falling back to Louvain (algorithm = 2).")
+  FALSE
+})
+if (!leiden_ok) {
+  merged <- FindClusters(merged, algorithm = 2, resolution = 0.5,
+                         random.seed = 42, verbose = FALSE)
+  warning("CLUSTERING FALLBACK: Leiden was unavailable; used Louvain instead.",
+          immediate. = TRUE)
+}
+
+merged$final_clusters <- merged$seurat_clusters
+merged <- RunUMAP(merged, dims = dims_use, seed.use = 42,
+                  reduction.name = "umap.rna", verbose = FALSE)
+```
+
+```{r atac-embed}
+DefaultAssay(merged) <- "ATAC"
+merged <- RunTFIDF(merged)
+merged <- FindTopFeatures(merged, min.cutoff = "q5")
+merged <- RunSVD(merged, reduction.name = "lsi")
+merged <- RunUMAP(merged, reduction = "lsi", dims = 2:30,
+                  reduction.name = "umap.atac", seed.use = 42, verbose = FALSE)
+DefaultAssay(merged) <- "SCT"
+```
+
+## Elbow plots for dimensionality selection
+
+Inspect these before proceeding to WNN. Adjust `pca_dims` and `lsi_dims`
+in the next chunk based on where the curves flatten.
+
+```{r elbow-plots, fig.width=12, fig.height=5}
+# PCA elbow
+p_pca_elbow <- ElbowPlot(merged, ndims = 30, reduction = "pca") +
+  ggtitle("PCA elbow plot (RNA)") +
+  geom_vline(xintercept = 16, linetype = "dashed", color = "red", alpha = 0.6) +
+  annotate("text", x = 17, y = Inf, label = "default: 16",
+           hjust = 0, vjust = 1.5, color = "red", size = 3)
+
+# LSI variance plot (drop dim 1 — correlates with depth)
+lsi_stdev <- Stdev(merged[["lsi"]])
+lsi_df <- data.frame(
+  component = seq_along(lsi_stdev),
+  stdev = lsi_stdev
+)
+p_lsi_elbow <- ggplot(lsi_df[lsi_df$component >= 2, ],
+                      aes(component, stdev)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = 30, linetype = "dashed", color = "red", alpha = 0.6) +
+  annotate("text", x = 31, y = Inf, label = "default: 30",
+           hjust = 0, vjust = 1.5, color = "red", size = 3) +
+  labs(x = "LSI component", y = "Standard deviation",
+       title = "LSI elbow plot (ATAC, dim 1 excluded)") +
+  theme_classic(base_size = 12)
+
+print(p_pca_elbow + p_lsi_elbow)
+ggsave(file.path(fig_dir, "PCA_LSI_elbow_plots.pdf"),
+       p_pca_elbow + p_lsi_elbow, width = 12, height = 5)
+```
+
+# 12. WNN: joint RNA + ATAC neighbor graph, UMAP, clustering
+
+```{r wnn-build}
+# Edit these after inspecting elbow plots above
+pca_dims <- 1:16
+lsi_dims <- 2:25
+
+merged <- FindMultiModalNeighbors(
+  merged,
+  reduction.list = list("pca", "lsi"),
+  dims.list      = list(pca_dims, lsi_dims),
+  modality.weight.name = "RNA.weight",
+  verbose = FALSE
+)
+
+merged <- RunUMAP(
+  merged, nn.name = "weighted.nn",
+  reduction.name = "umap.wnn",
+  reduction.key  = "wnnUMAP_",
+  seed.use = 42, verbose = FALSE
+)
+```
+
+## Resolution sweep for leiden
+
+```{r wnn-resolution-sweep, fig.width=14, fig.height=10}
+res_grid <- c(0.2, 0.3, 0.4, 0.5,0.6, 0.7, 0.9)
+
+for (r in res_grid) {
+  merged <- FindClusters(
+    merged, graph.name = "wsnn",
+    algorithm = 4,
+    resolution = r,
+    random.seed = 42, verbose = FALSE
+  )
+  merged[[paste0("wnn_res_", r)]] <- merged$seurat_clusters
+}
+
+sweep_summary <- data.frame(
+  resolution = res_grid,
+  n_clusters = sapply(res_grid, function(r) {
+    length(unique(merged[[paste0("wnn_res_", r)]][, 1]))
+  })
+)
+print(sweep_summary)
+write.csv(sweep_summary, file.path(tbl_dir, "wnn_resolution_sweep.csv"),
+          row.names = FALSE)
+
+sweep_plots <- lapply(res_grid, function(r) {
+  DimPlot(merged, reduction = "umap.wnn",
+          group.by = paste0("wnn_res_", r),
+          label = TRUE, repel = TRUE) +
+    ggtitle(paste0("res = ", r, "  (",
+                   length(unique(merged[[paste0("wnn_res_", r)]][, 1])),
+                   " clusters)")) +
+    NoLegend()
+})
+sweep_panel <- wrap_plots(sweep_plots, ncol = 3)
+print(sweep_panel)
+ggsave(file.path(fig_dir, "WNN_resolution_sweep.pdf"),
+       sweep_panel, width = 16, height = 10)
+```
+
+## Pick a resolution
+
+Inspect `WNN_resolution_sweep.pdf` and set `chosen_res` below.
+
+```{r wnn-final-clusters}
+chosen_res <- 0.3   # <-- edit after viewing sweep
+
+merged$wnn_clusters <- merged[[paste0("wnn_res_", chosen_res)]][, 1]
+Idents(merged) <- "wnn_clusters"
+cat("Using resolution", chosen_res, "with",
+    length(unique(merged$wnn_clusters)), "clusters\n")
+```
+
+# 13. Tsoi signature scoring (annotation)
+
+```{r ucell}
+tsoi_raw <- read.csv(tsoi_path, check.names = FALSE, stringsAsFactors = FALSE)
+
+clean_genes <- function(x) {
+  x <- x[!is.na(x) & nchar(trimws(x)) > 0]
+  unique(trimws(x))
+}
+
+tsoi_combined <- list(
+  Melanocytic = clean_genes(tsoi_raw[["Melanocytic"]]),
+  Transitory_Melanocytic = clean_genes(tsoi_raw[["Transitory-Melanocytic"]]),
+  Transitory = clean_genes(tsoi_raw[["Transitory"]]),
+  NC_Transitory = clean_genes(tsoi_raw[["Neural crest-like-Transitory"]]),
+  NeuralCrest = clean_genes(tsoi_raw[["Neural crest-like"]]),
+  Undiff_NeuralCrest = clean_genes(tsoi_raw[[
+    "Undifferentiated-Neural crest-like"
+  ]]),
+  Undifferentiated = clean_genes(tsoi_raw[["Undifferentiated"]])
+)
+sapply(tsoi_combined, length)
+
+rna_genes <- rownames(merged[["RNA"]])
+tsoi_overlap <- data.frame(
+  signature = names(tsoi_combined),
+  n_genes = sapply(tsoi_combined, length),
+  n_in_rna = sapply(tsoi_combined, function(g) sum(g %in% rna_genes)),
+  pct_in_rna = sapply(tsoi_combined, function(g) {
+    round(100 * mean(g %in% rna_genes), 1)
+  })
+)
+print(tsoi_overlap)
+write.csv(tsoi_overlap, file.path(qc_dir, "tsoi_gene_overlap.csv"),
+          row.names = FALSE)
+
+# Filter signatures to genes detected in >=5% of cells
+DefaultAssay(merged) <- "RNA"
+rna_counts <- GetAssayData(merged, assay = "RNA", layer = "counts")
+detection_threshold <- 0.05
+
+tsoi_combined_filt <- lapply(tsoi_combined, function(g) {
+  g_in_rna <- intersect(g, rownames(rna_counts))
+  if (length(g_in_rna) == 0) return(character(0))
+  det <- rowMeans(rna_counts[g_in_rna, , drop = FALSE] > 0)
+  g_in_rna[det >= detection_threshold]
+})
+
+tsoi_filter_summary <- data.frame(
+  signature = names(tsoi_combined),
+  n_original = sapply(tsoi_combined, length),
+  n_in_rna = sapply(tsoi_combined, function(g) sum(g %in% rna_genes)),
+  n_filtered = sapply(tsoi_combined_filt, length)
+)
+tsoi_filter_summary$pct_retained_vs_in_rna <- round(
+  100 * tsoi_filter_summary$n_filtered / pmax(1, tsoi_filter_summary$n_in_rna), 1
+)
+print(tsoi_filter_summary)
+write.csv(tsoi_filter_summary, file.path(qc_dir, "tsoi_signature_filter_summary.csv"),
+          row.names = FALSE)
+
+keep_sigs <- names(tsoi_combined_filt)[sapply(tsoi_combined_filt, length) >= 10]
+tsoi_combined_filt <- tsoi_combined_filt[keep_sigs]
+cat("Signatures retained for scoring:", paste(keep_sigs, collapse = ", "), "\n")
+
+# Score with FILTERED 7-state signatures
+DefaultAssay(merged) <- "RNA"
+merged <- AddModuleScore_UCell(
+  merged,
+  features = tsoi_combined_filt,
+  name = "_UCellF",
+  assay = "RNA"
+)
+
+# 4-state collapsed signatures
+collapse_map <- c(
+  Melanocytic = "Melanocytic",
+  Transitory_Melanocytic = "Melanocytic",
+  Transitory = "Transitory",
+  NC_Transitory = "Transitory",
+  NeuralCrest = "NeuralCrest",
+  Undiff_NeuralCrest = "NeuralCrest",
+  Undifferentiated = "Undifferentiated"
+)
+
+tsoi4_combined_filt <- list(
+  Melanocytic = unique(unlist(tsoi_combined_filt[
+    names(collapse_map)[collapse_map == "Melanocytic"]
+  ])),
+  Transitory = unique(unlist(tsoi_combined_filt[
+    names(collapse_map)[collapse_map == "Transitory"]
+  ])),
+  NeuralCrest = unique(unlist(tsoi_combined_filt[
+    names(collapse_map)[collapse_map == "NeuralCrest"]
+  ])),
+  Undifferentiated = unique(unlist(tsoi_combined_filt[
+    names(collapse_map)[collapse_map == "Undifferentiated"]
+  ]))
+)
+tsoi4_combined_filt <- tsoi4_combined_filt[
+  sapply(tsoi4_combined_filt, length) >= 10
+]
+
+cat("4-state signature sizes after filtering:\n")
+print(sapply(tsoi4_combined_filt, length))
+
+merged <- AddModuleScore_UCell(
+  merged,
+  features = tsoi4_combined_filt,
+  name = "_UCell4",
+  assay = "RNA"
+)
+DefaultAssay(merged) <- "SCT"
+
+# Per-cluster z-score heatmap, 4-state
+ucell4_cols <- paste0(names(tsoi4_combined_filt), "_UCell4")
+ucell4_mat <- as.data.frame(merged@meta.data[, ucell4_cols, drop = FALSE])
+colnames(ucell4_mat) <- names(tsoi4_combined_filt)
+ucell4_z <- scale(as.matrix(ucell4_mat))
+
+cluster_tsoi4_mean <- aggregate(
+  ucell4_z,
+  by = list(cluster = merged$wnn_clusters),
+  FUN = mean
+)
+print(cluster_tsoi4_mean)
+write.csv(cluster_tsoi4_mean,
+          file.path(tbl_dir, "wnn_cluster_tsoi4_mean_zscore_filtered.csv"),
+          row.names = FALSE)
+
+mat4 <- as.matrix(cluster_tsoi4_mean[, -1])
+rownames(mat4) <- paste0("c", cluster_tsoi4_mean$cluster)
+
+heat4_df <- as.data.frame(mat4) %>%
+  tibble::rownames_to_column("cluster") %>%
+  pivot_longer(-cluster, names_to = "signature", values_to = "z")
+heat4_df$signature <- factor(heat4_df$signature, levels = names(tsoi4_combined_filt))
+heat4_df$cluster <- factor(
+  heat4_df$cluster,
+  levels = paste0("c", sort(unique(cluster_tsoi4_mean$cluster)))
+)
+
+
+
+# 7-state heatmap
+ucell7f_cols <- paste0(names(tsoi_combined_filt), "_UCellF")
+ucell7f_mat <- as.data.frame(merged@meta.data[, ucell7f_cols, drop = FALSE])
+colnames(ucell7f_mat) <- names(tsoi_combined_filt)
+ucell7f_z <- scale(as.matrix(ucell7f_mat))
+
+cluster_tsoi7f_mean <- aggregate(
+  ucell7f_z,
+  by = list(cluster = merged$wnn_clusters),
+  FUN = mean
+)
+write.csv(cluster_tsoi7f_mean,
+          file.path(tbl_dir, "wnn_cluster_tsoi7_mean_zscore_filtered.csv"),
+          row.names = FALSE)
+
+# Labeling from 7-state
+mat7f <- as.matrix(cluster_tsoi7f_mean[, -1])
+rownames(mat7f) <- paste0("c", cluster_tsoi7f_mean$cluster)
+
+top_state7 <- colnames(mat7f)[max.col(mat7f, ties.method = "first")]
+cluster_label_map7 <- setNames(top_state7, as.character(cluster_tsoi7f_mean$cluster))
+label_vec7 <- cluster_label_map7[as.character(merged$wnn_clusters)]
+names(label_vec7) <- colnames(merged)
+merged <- AddMetaData(merged, metadata = label_vec7, col.name = "wnn_cluster_tsoi7_filt")
+
+# Gap and confidence on 4-state
+mat4 <- as.matrix(cluster_tsoi4_mean[, -1])
+rownames(mat4) <- paste0("c", cluster_tsoi4_mean$cluster)
+
+top_z_4 <- apply(mat4, 1, max)
+second_z_4 <- apply(mat4, 1, function(x) sort(x, decreasing = TRUE)[2])
+top_lab_4 <- colnames(mat4)[max.col(mat4, ties.method = "first")]
+gap_4 <- top_z_4 - second_z_4
+
+cluster_labels_4 <- data.frame(
+  cluster = rownames(mat4),
+  top_label = top_lab_4,
+  top_z = round(top_z_4, 2),
+  second_z = round(second_z_4, 2),
+  gap = round(gap_4, 2),
+  confident = top_z_4 >= 0.5 & gap_4 >= 0.3
+)
+print(cluster_labels_4)
+write.csv(cluster_labels_4, file.path(tbl_dir, "wnn_cluster_tsoi4_labels_with_gap.csv"),
+          row.names = FALSE)
+
+# Write 4-state label to Seurat object
+stale_cols <- intersect("wnn_cluster_tsoi", colnames(merged@meta.data))
+if (length(stale_cols) > 0) {
+  merged@meta.data[, stale_cols] <- NULL
+  cat("Dropped stale label column(s):", paste(stale_cols, collapse = ", "), "\n")
+}
+
+label_map_4 <- setNames(
+  cluster_labels_4$top_label,
+  sub("^c", "", cluster_labels_4$cluster)
+)
+label_vec_4 <- label_map_4[as.character(merged$wnn_clusters)]
+names(label_vec_4) <- colnames(merged)
+merged <- AddMetaData(merged, metadata = label_vec_4, col.name = "wnn_cluster_tsoi")
+
+# Confidence-suffixed column
+confident_map <- setNames(
+  cluster_labels_4$confident,
+  sub("^c", "", cluster_labels_4$cluster)
+)
+label_vec_4_conf <- label_vec_4
+not_conf <- !confident_map[as.character(merged$wnn_clusters)]
+label_vec_4_conf[not_conf] <- paste0(label_vec_4_conf[not_conf], " (low conf)")
+merged <- AddMetaData(merged, metadata = label_vec_4_conf,
+                      col.name = "wnn_cluster_tsoi_with_conf")
+
+cat("Per-cluster 4-state labels written to merged$wnn_cluster_tsoi:\n")
+print(table(merged$wnn_clusters, merged$wnn_cluster_tsoi))
+```
+
+### Figure 7 plots
+
+```{r}
+# plot tsoi
+p_tsoi4_heat <- ggplot(heat4_df, aes(signature, cluster, fill = z)) +
+  geom_tile(color = "black") +
+  scale_fill_gradient2(
+    low = "#4575b4",
+    mid = "white",
+    high = "#d73027",
+    midpoint = 0,
+    limits = c(-1.5, 1.5),
+    breaks = c(-1.5, 0, 1.5),
+    oob = scales::squish
+  ) +
+  labs(
+    x = NULL,
+    y = "WNN cluster",
+    fill = "Mean UCell\nz-score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 12),
+    aspect.ratio = 6/5
+  )
+print(p_tsoi4_heat)
+ggsave(
+  file.path(fig_dir, "WNN_cluster_tsoi4_heatmap_filtered_final.pdf"),
+  p_tsoi4_heat,
+  width = 4,
+  height = 4
+)
+```
+
+
+
+# 14. WNN figures
+
+## Figure W1 — Three-panel WNN UMAP
+
+```{r figW1-wnn-umap-trio, fig.width=18, fig.height=6}
+p_w_sample <- DimPlot(
+  merged,
+  reduction = "umap.wnn",
+  group.by = "orig.ident",
+  cols = condition_colors
+) +
+  ggtitle("WNN UMAP by sample")
+
+p_w_clust <- DimPlot(
+  merged,
+  reduction = "umap.wnn",
+  group.by = "wnn_clusters",
+  label = TRUE,
+  repel = TRUE
+) +
+  ggtitle(paste0("WNN clusters (res = ", chosen_res, ")")) +
+  NoLegend()
+
+p_w_tsoi <- DimPlot(
+  merged,
+  reduction = "umap.wnn",
+  group.by = "wnn_cluster_tsoi",
+  cols = tsoi_colors_4
+) +
+  ggtitle("Per-cluster Tsoi label (4-state)")
+
+# Per-cell Tsoi argmax label
+ucell4_cols <- paste0(names(tsoi4_combined_filt), "_UCell4")
+cell_scores <- merged@meta.data[, ucell4_cols]
+colnames(cell_scores) <- names(tsoi4_combined_filt)
+cell_scores_z <- scale(cell_scores)
+merged$tsoi4_percell <- colnames(cell_scores_z)[max.col(cell_scores_z, ties.method = "first")]
+
+p_w_tsoi_percell <- DimPlot(merged, reduction = "umap.wnn",
+                            group.by = "tsoi4_percell", cols = tsoi_colors_4) +
+  ggtitle("Per-cell Tsoi label (4-state)")
+
+# W1a: per-cluster Tsoi labels
+# figW1a <- p_w_sample + p_w_clust + p_w_tsoi
+# ggsave(file.path(fig_dir, "FigW1a_WNN_UMAP_trio_cluster_labels.pdf"),
+#        figW1a, width = 14, height = 4)
+# print(p_w_sample / p_w_clust / p_w_tsoi)
+
+# W1b: per-cell Tsoi labels
+figW1b <- p_w_sample + p_w_clust + p_w_tsoi_percell
+ggsave(file.path(fig_dir, "FigW1b_WNN_UMAP_trio_percell_labels.pdf"),
+       figW1b, width = 14, height = 4)
+print(p_w_sample / p_w_clust / p_w_tsoi_percell)
+
+# --- Continuous UCell scores on UMAP ---
+ucell4_cols <- paste0(names(tsoi4_combined_filt), "_UCell4")
+
+p_ucell_list <- lapply(seq_along(ucell4_cols), function(i) {
+  FeaturePlot(
+    merged,
+    features = ucell4_cols[i],
+    reduction = "umap.wnn",
+    order = TRUE
+  ) +
+    scale_x_continuous(breaks = c(-5, -2.5, 0, 2.5, 5)) +
+    scale_color_viridis_c(
+      option = "magma",
+      breaks = scales::breaks_pretty(n = 3)
+    ) +
+    ggtitle(names(tsoi4_combined_filt)[i]) +
+    theme(plot.title = element_text(size = 14, face = "bold"))
+})
+
+umap_w <- 14 / 3
+umap_h <- 4
+
+ucell_ncol <- 2
+ucell_nrow <- ceiling(length(p_ucell_list) / ucell_ncol)
+
+fig_ucell <- wrap_plots(p_ucell_list, ncol = ucell_ncol)
+
+print(fig_ucell)
+
+ggsave(
+  file.path(fig_dir, "WNN_UMAP_tsoi4_UCell_continuous.pdf"),
+  fig_ucell,
+  width = umap_w * ucell_ncol,
+  height = umap_h * ucell_nrow
+)
+
+# --- MITF and SOX10 expression on UMAP ---
+DefaultAssay(merged) <- "RNA"
+
+p_mitf <- FeaturePlot(
+  merged,
+  features = "MITF",
+  reduction = "umap.wnn",
+  order = TRUE
+) +
+  scale_x_continuous(breaks = c(-5, -2.5, 0, 2.5, 5)) +
+  scale_color_viridis_c(
+    option = "magma",
+    breaks = scales::breaks_pretty(n = 3)
+  ) +
+  ggtitle("MITF")
+
+p_sox10 <- FeaturePlot(
+  merged,
+  features = "SOX10",
+  reduction = "umap.wnn",
+  order = TRUE
+) +
+  scale_x_continuous(breaks = c(-5, -2.5, 0, 2.5, 5)) +
+  scale_color_viridis_c(
+    option = "magma",
+    breaks = scales::breaks_pretty(n = 3)
+  ) +
+  ggtitle("SOX10")
+
+fig_genes <- p_mitf + p_sox10
+
+print(fig_genes)
+
+ggsave(
+  file.path(fig_dir, "WNN_UMAP_MITF_SOX10_expression.pdf"),
+  fig_genes,
+  width = umap_w * 2,
+  height = umap_h
+)
+```
+
+
+## Figure W3 — Cluster composition per sample
+
+```{r figW3-cluster-composition, fig.width=8, fig.height=5}
+sample_levels <- sample_names
+
+cluster_pct <- as.data.frame(merged@meta.data) %>%
+  mutate(orig.ident = factor(orig.ident, levels = sample_levels)) %>%
+  count(orig.ident, cluster = wnn_clusters) %>%
+  group_by(orig.ident) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+p_comp <- ggplot(cluster_pct, aes(orig.ident, pct, fill = cluster)) +
+  geom_col(width = 0.75) +
+  labs(x = NULL, y = "% of cells", fill = "WNN cluster",
+       title = "Cluster composition per sample (JUND-only)") +
+  theme_classic(base_size = 13)
+print(p_comp)
+ggsave(file.path(fig_dir, "FigW3_cluster_composition.pdf"),
+       p_comp, width = 8, height = 5)
+write.csv(cluster_pct, file.path(tbl_dir, "wnn_cluster_composition.csv"),
+          row.names = FALSE)
+```
+
+### Propeller analysis for cell proportions
+
+```{r}
+result <- run_propeller_analysis(
+  seurat_obj = merged,
+  rna_cluster_col = "wnn_clusters", # <-- set to your RNA cluster column
+  sample_col = "orig.ident",
+  kd_sample = "JUND_KD",
+  ntc_samples = c("NTC_rep1", "NTC_rep2"),
+  sample_colors = sample_colors # the one from your existing script
+)
+```
+
+
+## Figure W4 — Cluster shifts: JUND_KD vs NTC
+
+```{r figW4-cluster-shifts}
+library(purrr)
+library(ggpubr)
+
+library(purrr)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# -----------------------------
+# User inputs
+# -----------------------------
+
+cluster_col <- "wnn_clusters"
+sample_col <- "orig.ident"
+
+ntc_samples <- c("NTC_rep1", "NTC_rep2")
+kd_sample <- "JUND_KD"
+
+sample_order <- c("NTC_rep1", "NTC_rep2", "JUND_KD")
+
+sample_colors <- c(
+  "JUND_KD" = "#B51D0E",
+  "NTC_rep1" = "grey30",
+  "NTC_rep2" = "grey65"
+)
+
+dir.create(tbl_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+# -----------------------------
+# 1. Metadata
+# -----------------------------
+
+stopifnot(cluster_col %in% colnames(merged@meta.data))
+stopifnot(sample_col %in% colnames(merged@meta.data))
+
+meta_df <- merged@meta.data %>%
+  as.data.frame() %>%
+  mutate(
+    cluster = as.character(.data[[cluster_col]]),
+    sample = as.character(.data[[sample_col]])
+  ) %>%
+  dplyr::filter(sample %in% sample_order) %>%
+  mutate(
+    sample = factor(sample, levels = sample_order),
+    cluster = factor(
+      cluster,
+      levels = sort(unique(as.numeric(as.character(cluster))))
+    )
+  )
+
+cat("\nCells per sample:\n")
+print(table(meta_df$sample))
+
+cat("\nCells per cluster:\n")
+print(table(meta_df$cluster))
+
+# -----------------------------
+# 2. Percent composition per sample
+# -----------------------------
+
+cluster_counts <- meta_df %>%
+  dplyr::count(sample, cluster, name = "n_cells") %>%
+  group_by(sample) %>%
+  mutate(
+    sample_total = sum(n_cells),
+    pct = 100 * n_cells / sample_total
+  ) %>%
+  ungroup()
+
+write.csv(
+  cluster_counts,
+  file.path(tbl_dir, "wnn_cluster_counts_and_pct_by_sample.csv"),
+  row.names = FALSE
+)
+
+# -----------------------------
+# 3. Effect-size table: KD vs each NTC replicate
+# -----------------------------
+
+clusters <- levels(meta_df$cluster)
+
+pct_wide <- cluster_counts %>%
+  select(sample, cluster, pct) %>%
+  pivot_wider(names_from = sample, values_from = pct, values_fill = 0)
+
+effect_sizes <- pct_wide %>%
+  mutate(
+    mean_NTC_pct = (NTC_rep1 + NTC_rep2) / 2,
+    delta_pct = JUND_KD - mean_NTC_pct,
+    log2_ratio = log2((JUND_KD + 0.01) / (mean_NTC_pct + 0.01)),
+    delta_vs_rep1 = JUND_KD - NTC_rep1,
+    delta_vs_rep2 = JUND_KD - NTC_rep2,
+    consistent_direction = sign(delta_vs_rep1) == sign(delta_vs_rep2),
+    ntc_diff = abs(NTC_rep1 - NTC_rep2),
+    exceeds_ntc_noise = abs(delta_pct) > ntc_diff,
+    candidate = consistent_direction &
+      exceeds_ntc_noise &
+      abs(delta_pct) > 1,
+    direction = case_when(
+      candidate & delta_pct > 0 ~ "enriched in KD",
+      candidate & delta_pct < 0 ~ "depleted in KD",
+      TRUE ~ ""
+    )
+  )
+
+# -----------------------------
+# 4. Propeller results (load from result$master saved earlier, OR re-run)
+# -----------------------------
+# Assumes you have 'result' in your environment from run_propeller_analysis()
+# If not, source the functions file and run it first.
+
+stopifnot(exists("result"))
+stopifnot(!is.null(result$master))
+
+propeller_stats <- result$master %>%
+  select(cluster, propeller_p, propeller_fdr, boot_frac_sig_05) %>%
+  mutate(cluster = as.character(cluster))
+
+# -----------------------------
+# 5. Build annotation tables for the plot
+# -----------------------------
+
+
+format_fdr <- function(fdr) {
+  sapply(fdr, function(x) {
+    if (is.na(x)) {
+      return("")
+    }
+    # Split into mantissa and exponent
+    exp_val <- floor(log10(x))
+    mant_val <- x / 10^exp_val
+    # Round mantissa to 1 decimal; drop trailing ".0"
+    mant_str <- sub("\\.0$", "", sprintf("%.1f", mant_val))
+    sprintf("FDR == %s %%*%% 10^%d", mant_str, exp_val)
+  })
+}
+
+# Format delta as signed percentage (e.g. +11.0%)
+format_delta <- function(d) sprintf("%+.1f%%", d)
+
+bracket_df <- propeller_stats %>%
+  left_join(
+    effect_sizes %>%
+      select(cluster, delta_pct, candidate) %>%
+      mutate(cluster = as.character(cluster)),
+    by = "cluster"
+  ) %>%
+  left_join(
+    cluster_counts %>%
+      group_by(cluster) %>%
+      summarise(y_max = max(pct), .groups = "drop") %>%
+      mutate(cluster = as.character(cluster)),
+    by = "cluster"
+  ) %>%
+  mutate(
+    x_center = as.numeric(factor(cluster, levels = clusters)),
+    x_ntc = x_center - 0.125, # midpoint of the two NTC bars
+    x_kd = x_center + 0.25, # JUND_KD bar
+    y_delta = y_max + 1.5, # delta % sits just above tallest bar
+    y_bracket = y_max + 4.5, # bracket sits above the delta label
+    y_fdr = y_max + 6.5, # FDR sits above the bracket
+    delta_label = format_delta(delta_pct),
+    fdr_label = format_fdr(propeller_fdr),
+    delta_color = ifelse(candidate, "firebrick", "grey40"),
+    fdr_color = ifelse(propeller_fdr < 0.05, "firebrick", "grey40")
+  )
+
+# Tick marks on each end of the bracket
+tick_height <- 0.4
+
+# -----------------------------
+# 6. The plot
+# -----------------------------
+
+y_top <- max(bracket_df$y_fdr) + 2
+
+p_comp <- ggplot(
+  cluster_counts,
+  aes(x = cluster, y = pct, fill = sample)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.68,
+    color = "black",
+    linewidth = 0.15
+  ) +
+  # Delta % label (just above the tallest bar)
+  geom_text(
+    data = bracket_df,
+    aes(x = x_center, y = y_delta, label = delta_label, color = delta_color),
+    inherit.aes = FALSE,
+    size = 3.8,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  # Horizontal bracket: NTC midpoint -> JUND_KD
+  geom_segment(
+    data = bracket_df,
+    aes(x = x_ntc, xend = x_kd, y = y_bracket, yend = y_bracket),
+    inherit.aes = FALSE,
+    linewidth = 0.4
+  ) +
+  # Left tick (NTC midpoint)
+  geom_segment(
+    data = bracket_df,
+    aes(x = x_ntc, xend = x_ntc, y = y_bracket - tick_height, yend = y_bracket),
+    inherit.aes = FALSE,
+    linewidth = 0.4
+  ) +
+  # Right tick (JUND_KD)
+  geom_segment(
+    data = bracket_df,
+    aes(x = x_kd, xend = x_kd, y = y_bracket - tick_height, yend = y_bracket),
+    inherit.aes = FALSE,
+    linewidth = 0.4
+  ) +
+  # FDR label (above the bracket)
+  geom_text(
+    data = bracket_df,
+    aes(x = x_center + 0.06, y = y_fdr, label = fdr_label, color = fdr_color),
+    inherit.aes = FALSE,
+    size = 3.2,
+    fontface = "bold",
+    parse = TRUE,
+    show.legend = FALSE
+  ) +
+  scale_color_identity() +
+  scale_fill_manual(values = sample_colors) +
+  labs(
+    x = "WNN cluster",
+    y = "% of sample's cells",
+    title = "Cell-state composition shifts upon JUND knockdown",
+    subtitle = "Percent of cells per WNN cluster. FDR from propeller comparing NTC group vs JUND KD.",
+    fill = NULL
+  ) +
+  coord_cartesian(ylim = c(0, y_top)) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey30")
+  )
+
+print(p_comp)
+
+ggsave(
+  file.path(fig_dir, "JUND_WNN_cluster_frequency_with_propeller_fdr.pdf"),
+  p_comp,
+  width = 11,
+  height = 6.5
+)
+
+# Also save the propeller stats table alongside the plot for the figure legend
+write.csv(
+  result$master,
+  file.path(tbl_dir, "JUND_WNN_propeller_master.csv"),
+  row.names = FALSE
+)
+```
+
+
+
+#  Save joint object and session info
+
+```{r save}
+saveRDS(merged, file.path(output_dir, "merged_multiome_jund_only.rds"))
+
+sink(file.path(output_dir, "session_info.txt"))
+print(sessionInfo())
+sink()
+```
+
+# FindAllMarkers: RNA + ATAC, one-vs-all per WNN cluster
+
+```{r find-all-markers}
+stopifnot("wnn_clusters" %in% colnames(merged@meta.data))
+Idents(merged) <- "wnn_clusters"
+cat("Clusters present:\n")
+print(table(Idents(merged)))
+
+RNA_STRICT <- 1.0
+RNA_LOOSE <- 0.5
+ATAC_STRICT <- 0.75
+ATAC_LOOSE <- 0.5
+PADJ <- 0.05
+
+log_path <- file.path(tbl_dir, "FindAllMarkers_progress.log")
+log_msg <- function(msg) {
+  ts <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(paste0("[", ts, "] ", msg, "\n"), file = log_path, append = TRUE)
+  cat(paste0("[", ts, "] ", msg, "\n"))
+}
+cat("", file = log_path)
+log_msg("Starting FindAllMarkers pipeline (JUND-only)")
+
+# RNA: one-vs-all
+log_msg("RNA FindAllMarkers starting...")
+t0 <- Sys.time()
+
+DefaultAssay(merged) <- "RNA"
+merged <- NormalizeData(merged, verbose = FALSE)
+
+rna_all_markers <- FindAllMarkers(
+  merged,
+  assay = "RNA",
+  slot = "data",
+  test.use = "wilcox",
+  only.pos = TRUE,
+  min.pct = 0.1,
+  logfc.threshold = 0.1,
+  verbose = FALSE
+)
+
+elapsed_rna <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
+log_msg(paste("RNA FindAllMarkers done in", elapsed_rna, "minutes;",
+              nrow(rna_all_markers), "rows"))
+
+write.csv(rna_all_markers, file.path(tbl_dir, "FindAllMarkers_RNA_full.csv"),
+          row.names = FALSE)
+
+rna_summary <- rna_all_markers %>%
+  filter(p_val_adj < PADJ, avg_log2FC > RNA_STRICT) %>%
+  group_by(cluster) %>%
+  summarise(
+    n_markers_strict = n(),
+    top10 = paste(head(gene[order(-avg_log2FC)], 10), collapse = ", "),
+    .groups = "drop"
+  )
+print(rna_summary)
+write.csv(rna_summary, file.path(tbl_dir, "FindAllMarkers_RNA_summary_strict.csv"),
+          row.names = FALSE)
+
+rna_summary_loose <- rna_all_markers %>%
+  filter(p_val_adj < PADJ, avg_log2FC > RNA_LOOSE) %>%
+  group_by(cluster) %>%
+  summarise(n_markers_loose = n(), .groups = "drop")
+write.csv(rna_summary_loose, file.path(tbl_dir, "FindAllMarkers_RNA_summary_loose.csv"),
+          row.names = FALSE)
+
+saveRDS(rna_all_markers, file.path(tbl_dir, "FindAllMarkers_RNA_full.rds"))
+log_msg("RNA summary saved; starting ATAC...")
+```
+
+
+# plot heatmap of tsoi genes with FindAllMarkers
+
+```{r}
+RNA_MARKER_LOGFC_CUTOFF <- 0.5
+RNA_MARKER_PADJ_CUTOFF <- 0.05
+rna_markers <- readRDS(file.path(tbl_dir, "FindAllMarkers_RNA_full.rds"))
+sig_genes <- rna_markers %>%
+  filter(
+    p_val_adj < RNA_MARKER_PADJ_CUTOFF,
+    avg_log2FC > RNA_MARKER_LOGFC_CUTOFF
+  ) %>%
+  pull(gene) %>%
+  unique()
+
+# intersect with tsoi genes
+tsoi_in_markers <- lapply(tsoi4_combined_filt, function(gs) {
+  intersect(gs, sig_genes)
+})
+tsoi_df <- stack(tsoi_in_markers)
+colnames(tsoi_df) <- c("gene", "tsoi_state")
+
+# force-include key genes even if they didn't pass the logFC cutoff
+# assign each to its biological tsoi state
+force_include <- data.frame(
+  gene = c("SOX10", "MITF", "AXL"),
+  tsoi_state = c("Melanocytic", "Melanocytic", "Undifferentiated"),
+  stringsAsFactors = FALSE
+)
+# only add genes that exist in the RNA assay but aren't already in tsoi_df
+force_include <- force_include[!force_include$gene %in% tsoi_df$gene, ]
+force_include <- force_include[force_include$gene %in% rownames(merged[["RNA"]]), ]
+if (nrow(force_include) > 0) {
+  tsoi_df <- rbind(tsoi_df, force_include)
+}
+
+# mean scaled expression per cluster
+DefaultAssay(merged) <- "RNA"
+avg_expr <- AverageExpression(
+  merged,
+  features = tsoi_df$gene,
+  group.by = "wnn_clusters",
+  assays = "RNA"
+)$RNA
+# z-score across clusters (rows = genes)
+avg_z <- t(scale(t(as.matrix(avg_expr))))
+
+# --- ComplexHeatmap of Tsoi marker genes ---
+library(ComplexHeatmap)
+library(circlize)
+
+# order genes by tsoi state
+tsoi_df$tsoi_state <- factor(tsoi_df$tsoi_state,
+                              levels = c("Melanocytic", "Transitory",
+                                         "NeuralCrest", "Undifferentiated"))
+tsoi_df <- tsoi_df[order(tsoi_df$tsoi_state), ]
+avg_z_ordered <- avg_z[tsoi_df$gene, ]
+
+# clamp z-scores for color consistency
+avg_z_ordered[avg_z_ordered > 2] <- 2
+avg_z_ordered[avg_z_ordered < -2] <- -2
+
+# row annotation: tsoi state color bar
+tsoi_state_colors <- c(
+  Melanocytic      = "#4E79A7",
+  Transitory       = "#F28E2B",
+  NeuralCrest      = "#59A14F",
+  Undifferentiated = "#E15759"
+)
+row_ha <- rowAnnotation(
+  State = tsoi_df$tsoi_state,
+  col = list(State = tsoi_state_colors),
+  show_annotation_name = FALSE,
+  show_legend = FALSE
+)
+
+# select genes to label: top 10 per tsoi state + must-have genes
+N_PER_STATE <- 5
+must_label <- c("MITF", "SOX10", "AXL")
+top_per_state <- rna_markers %>%
+  filter(p_val_adj < RNA_MARKER_PADJ_CUTOFF,
+         avg_log2FC > RNA_MARKER_LOGFC_CUTOFF,
+         gene %in% tsoi_df$gene) %>%
+  inner_join(tsoi_df, by = "gene") %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  group_by(tsoi_state) %>%
+  slice_max(avg_log2FC, n = N_PER_STATE, with_ties = FALSE) %>%
+  pull(gene) %>%
+  unique()
+genes_to_label <- unique(c(must_label[must_label %in% tsoi_df$gene], top_per_state))
+
+# anno_mark for non-overlapping gene labels
+label_idx <- which(rownames(avg_z_ordered) %in% genes_to_label)
+label_names <- rownames(avg_z_ordered)[label_idx]
+right_ha <- rowAnnotation(
+  genes = anno_mark(
+    at = label_idx,
+    labels = label_names,
+    labels_gp = gpar(fontsize = 12, fontface = "italic"),
+    link_width = unit(8, "mm")
+  )
+)
+
+# rename columns to C1, C2, ...
+colnames(avg_z_ordered) <- paste0("C", seq_len(ncol(avg_z_ordered)))
+
+col_fun <- colorRamp2(c(-2, 0, 2), c("#4575b4", "white", "#d73027"))
+
+ht <- Heatmap(
+  avg_z_ordered,
+  name = "Mean expression\nz-score",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  column_names_gp = gpar(fontsize = 14),
+  width = unit(4.5, "cm"),
+  row_split = tsoi_df$tsoi_state,
+  row_gap = unit(2, "mm"),
+  left_annotation = row_ha,
+  right_annotation = right_ha,
+  row_title_gp = gpar(fontsize = 12),
+  column_title = NULL,
+  heatmap_legend_param = list(
+    at = c(-2, 0, 2),
+    labels = c("-2", "0", "2"),
+    title_gp = gpar(fontsize = 12),
+    labels_gp = gpar(fontsize = 11)
+  )
+)
+
+pdf(file.path(fig_dir, "tsoi_marker_genes_complexheatmap.pdf"),
+    width = 5.5, height = 10)
+draw(ht)
+dev.off()
+
+draw(ht)
+```
+
+
+```{r}
+TOP_MARKERS_PER_CLUSTER <- 5
+RNA_MARKER_LOGFC_CUTOFF <- 0.5
+RNA_MARKER_PADJ_CUTOFF <- 0.05
+
+# Filter less-interpretable transcript names.
+# This is not perfect, but it helps make the dot plot readable.
+unannotated_pattern <- "^(LINC|LOC|MIR|SNOR|RNU)\\d|^A[CFLP]\\d{6}|\\.\\d+$"
+
+top_rna_markers <- rna_all_markers %>%
+  filter(
+    p_val_adj < RNA_MARKER_PADJ_CUTOFF,
+    avg_log2FC > RNA_MARKER_LOGFC_CUTOFF,
+    !grepl(unannotated_pattern, gene)
+  ) %>%
+  mutate(
+    specificity = avg_log2FC * (pct.1 - pct.2)
+  ) %>%
+  group_by(cluster) %>%
+  slice_max(specificity, n = TOP_MARKERS_PER_CLUSTER, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(as.numeric(as.character(cluster)), desc(specificity))
+
+write.csv(
+  top_rna_markers,
+  file.path(tbl_dir, "top_RNA_markers_for_dotplot_specificity.csv"),
+  row.names = FALSE
+)
+
+top_rna_genes <- unique(top_rna_markers$gene)
+
+cat("Top marker genes selected for dot plot:", length(top_rna_genes), "\n")
+print(top_rna_markers)
+
+DefaultAssay(merged) <- "RNA"
+Idents(merged) <- "wnn_clusters"
+
+top_rna_genes <- intersect(top_rna_genes, rownames(merged[["RNA"]]))
+
+if (length(top_rna_genes) == 0) {
+  stop("None of the selected marker genes were found in the RNA assay.")
+}
+
+p_top_rna_markers <- DotPlot(
+  merged,
+  features = top_rna_genes,
+  group.by = "wnn_clusters",
+  assay = "RNA"
+) +
+  scale_color_gradient2(
+    low = "#4575b4",
+    mid = "white",
+    high = "#d73027",
+    midpoint = 0
+  ) +
+  labs(
+    x = "Top RNA marker genes",
+    y = "WNN cluster",
+    color = "Average\nexpression",
+    size = "Percent\nexpressed",
+    title = "Top RNA markers define WNN cluster identities"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(
+      size = 10,
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5,
+      face = "italic"
+    ),
+    axis.text.y = element_text(size = 11),
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_top_rna_markers)
+
+ggsave(
+  file.path(fig_dir, "top_RNA_markers_dotplot_specificity.pdf"),
+  p_top_rna_markers,
+  width = max(10, 0.35 * length(top_rna_genes)),
+  height = 5.5
+)
+
+cat(
+  "Top marker dot plot saved to:",
+  file.path(fig_dir, "top_RNA_markers_dotplot_specificity.pdf"),
+  "\n"
+)
+```
+

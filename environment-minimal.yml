@@ -1,0 +1,27 @@
+name: ap1_proj
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - shap
+  - tqdm
+  - pytorch
+  - jupyter
+  - conda-forge::adjusttext
+  - conda-forge::umap-learn
+  - anaconda::openpyxl
+  - conda-forge::matplotlib-venn
+  - plotly
+  - scanpy
+  - python-igraph
+  - leidenalg
+prefix: /opt/homebrew/Caskroom/miniforge/base/envs/ap1_proj

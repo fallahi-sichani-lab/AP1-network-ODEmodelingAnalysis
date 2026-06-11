@@ -1402,6 +1402,7 @@ rna_all_markers <- FindAllMarkers(
   logfc.threshold = 0.1,
   verbose = FALSE
 )
+rna_all_markers$p_val_adj <- p.adjust(rna_all_markers$p_val, method = "BH")
 
 elapsed_rna <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
 log_msg(paste("RNA FindAllMarkers done in", elapsed_rna, "minutes;",

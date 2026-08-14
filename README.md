@@ -7,6 +7,8 @@ validation by single-nucleus multiome (RNA + ATAC).
 
 **Looking for the script behind a specific figure? See [FIGURES.md](FIGURES.md).**
 
+Note: **Figures.md is in progress and will be updated**
+
 ## Repository structure
 
 ```
@@ -29,7 +31,7 @@ during revision — so the figure mapping lives in [FIGURES.md](FIGURES.md) rath
 than in directory names.
 
 ## This repository is code only
-**FigureMD will be updated**
+
 **No datasets are distributed here.** The repo documents and preserves the
 analysis itself — what was computed, in what order, to produce which figure.
 The 4i single-cell measurements, the simulation output, and the multiome data

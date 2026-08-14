@@ -51,6 +51,34 @@ run_opts <- list(
 )
 ```
 
+```{r repo-helpers}
+# Locate the repo root so helpers in src/ can be sourced from any working
+# directory. Walks up from getwd() (or $AP1_REPO_ROOT, if set).
+ap1_repo_root <- function(start = NULL) {
+  if (is.null(start)) {
+    start <- Sys.getenv("AP1_REPO_ROOT", unset = "")
+    if (!nzchar(start)) start <- getwd()
+  }
+  p <- normalizePath(start, mustWork = FALSE)
+  repeat {
+    if (dir.exists(file.path(p, "src")) && dir.exists(file.path(p, "analysis"))) {
+      return(p)
+    }
+    parent <- dirname(p)
+    if (identical(parent, p)) break
+    p <- parent
+  }
+  stop("Could not locate the AP1-network-ODEmodelingAnalysis root from ", start,
+       ".\nSet it explicitly, e.g.\n",
+       "    Sys.setenv(AP1_REPO_ROOT = '/path/to/AP1-network-ODEmodelingAnalysis')")
+}
+
+repo_root <- ap1_repo_root()
+
+# Defines run_propeller_analysis(), used in section 14 (cluster proportions).
+source(file.path(repo_root, "src", "propeller_JUND_v2.R"))
+```
+
 ```{r paths}
 base_path <- "/Volumes/FallahiLab/Maize-Data/Data/Magda_Bujnowska/20240530_multiome_analysis/20240720_Multiome_analysis"
 tsoi_path <- "/Volumes/FallahiLab/Maize-Data/Data/Yonatan_Degefu/ap1_multiomic_analysis/data/processed/curated_gene_sets/Tsoi_et_al_gene_list.csv"

@@ -1,171 +1,204 @@
 # AP1-network-ODEmodelingAnalysis
 
-A mechanistic ODE model of the AP-1 network capturing dimerization-controlled, co-regulated, competitive interactions in single melanoma cells, followed by model calibration to single-cell data and follow-up single-cell analysis.
+A mechanistic ODE model of the AP-1 network capturing dimerization-controlled,
+co-regulated, competitive interactions in single melanoma cells, followed by
+model calibration to single-cell data, in silico perturbation, and experimental
+validation by single-nucleus multiome (RNA + ATAC).
 
-## Repository Structure
+**Looking for the script behind a specific figure? See [FIGURES.md](FIGURES.md).**
+
+## Repository structure
 
 ```
 .
-├── analysis/           # Jupyter notebooks and R scripts (run in order)
-├── src/               # Python modules, COPASI model, and simulation scripts
-└── README.md
+├── analysis/                        # Notebooks and R scripts, grouped by pipeline stage
+│   ├── 01_experimental_data/        # 4i single-cell measurements
+│   ├── 02_model_simulation/         # LHS sweep processing, uncalibrated model
+│   ├── 03_calibration/              # Calibration to experimental data
+│   ├── 04_calibrated_model_analysis/# PLSDA, UMAP, heterogeneity
+│   └── 05_jund_kd_perturbation/     # JUND KD: in silico + multiome validation
+├── src/                             # Python modules, R helpers, COPASI model, cluster scripts
+├── data/                            # Small reference files committed to the repo
+├── FIGURES.md                       # Figure → script index
+└── environment.yml                  # Conda environment
 ```
 
-## Analysis Pipeline
+Folders follow **run order**, not figure number. A single script often feeds
+several figures (`07` feeds Figures 3, 4, and 6), and figure numbers change
+during revision — so the figure mapping lives in [FIGURES.md](FIGURES.md) rather
+than in directory names.
 
-The notebooks should be run in numerical order. Each notebook corresponds to specific figures in the manuscript.
+## Scope: this repository is code only
 
-### Stage 1: Experimental Data Processing
+**No datasets are distributed here.** The repo documents and preserves the
+analysis itself — what was computed, in what order, to produce which figure.
+The 4i single-cell measurements, the LHS simulation output, and the multiome
+data are not included; they are large and live on lab storage.
+
+Running these scripts as-is is therefore not expected to work out of the box.
+The data paths in them are specific to our lab environment: most scripts read by
+bare filename or by a path relative to whatever directory they were run from
+(e.g. `pd.read_csv('20260521_ap1_select_filtered.csv')`,
+`read_csv("processed_simulations/...")`), and a few contain absolute
+`/Volumes/FallahiLab/...` paths.
+
+To reuse any of this, expect to obtain the data separately and adapt the input
+paths to your own layout. What the code gives you is the method, the parameter
+choices, and the exact sequence of steps.
+
+The one piece that does work from any directory is importing this repo's own
+Python and R helpers — see below.
+
+### Importing `src/` modules
+
+Notebooks that use `plsda_module`, `param_scan`, or `COLO858_pertrubation_analysis`
+begin with a bootstrap cell that locates the repo root and adds `src/` to
+`sys.path`. It walks up from the current working directory looking for a folder
+containing both `src/` and `analysis/`.
+
+If you run a notebook from outside this checkout — e.g. from wherever your data
+lives — the walk-up won't find the repo. Point it there explicitly **before**
+running the bootstrap cell:
+
+```python
+import os
+os.environ["AP1_REPO_ROOT"] = "/path/to/AP1-network-ODEmodelingAnalysis"
+```
+
+`12_multiome_JUND_KD_analysis.Rmd` uses the same convention in R
+(`Sys.setenv(AP1_REPO_ROOT = "...")`) to `source()` its propeller helpers.
+
+## Analysis pipeline
+
+Run in numerical order. Numbers are global across folders, so `06b` sits in the
+perturbation stage even though it sorts near `06`.
+
+### Stage 1 — Experimental data (`analysis/01_experimental_data/`)
 
 **`01_process_singlecell_experimental_data.ipynb`**
-- **Purpose**: Processes single-cell AP-1 protein measurements from 4i imaging
-- **Analyses**: UMAP dimensionality reduction, PCA, violin plots
-- **Outputs**: Processed experimental data for model calibration
-- **Manuscript figures**: Figure 1, Supplementary Figure S1
+- Processes single-cell AP-1 protein measurements from 4i imaging
+- UMAP, PCA, violin plots, AP-1 state assignment
+- Outputs processed experimental data used for calibration
 
-**`plot_clustermap_figure1A.R`** (standalone)
-- **Purpose**: Generates clustermap visualization of single-cell data
-- **Inputs**: Raw 4i single-cell data (independent - reads data directly)
-- **Analyses**: Hierarchical clustering of 5 AP-1 proteins + 2 differentiation markers across cell lines
-- **Manuscript figures**: Figure 1A
+**`01b_threshold_sensitivity_analysis.ipynb`**
+- Tests how robust AP-1 state calls are to the protein-positivity thresholds
+- Sweeps GMM-derived and anchor-based thresholds across all 19 cell lines,
+  scoring state stability
+- Has a `SMOKE_TEST` flag: `True` runs a fast 3-value grid, `False` the full sweep
 
-### Stage 2: Model Simulations
+**`plot_clustermap.R`** (standalone — reads raw data directly)
+- Hierarchical clustering of 5 AP-1 proteins + 2 differentiation markers across
+  cell lines
+
+### Stage 2 — Model simulation (`analysis/02_model_simulation/`)
 
 **`02_process_LHS_simulations.ipynb`**
-- **Purpose**: Processes large-scale parameter space exploration (20,000 parameter sets × 200 initial conditions)
-- **Analyses**: Removes failed simulations, prepares data for downstream analysis
-- **Outputs**: Cleaned simulation results
-- **Manuscript figures**: None (data preparation)
+- Processes the Latin Hypercube sweep (20,000 parameter sets × 200 initial
+  conditions), removing failed simulations
+- Produces no figure; feeds every downstream stage
 
 **`03_analyze_uncalibrated_model.ipynb`**
-- **Purpose**: Initial exploration of AP-1 ODE model dynamics before calibration
-- **Analyses**: Characterizes model behavior across parameter space
-- **Outputs**: Uncalibrated model analysis results
-- **Manuscript figures**: Figure 2 (all panels)
+- Characterizes AP-1 model dynamics across parameter space before calibration
 
-### Stage 3: Model Calibration
+### Stage 3 — Calibration (`analysis/03_calibration/`)
 
 **`04_calibrate_model_to_experiments.ipynb`**
-- **Purpose**: Calibrates ODE model parameters to experimental single-cell data
-- **Inputs**: Outputs from notebooks 01 and 02
-- **Analyses**: Parameter calibration algorithm, validation
-- **Outputs**: Calibrated parameter sets for downstream analysis
-- **Manuscript figures**: Figure 3A (calibration logic)
+- Calibrates ODE parameters to experimental single-cell data
+- Inputs: outputs of `01` and `02`; outputs calibrated parameter sets
 
-**`04b_plot_upset_calibration_figure3B.R`**
-- **Purpose**: Visualizes parameter set retention and overlap across cell lines
-- **Inputs**: Outputs from notebook 04
-- **Analyses**: Upset plot showing shared/unique calibrated parameter sets among 19 cell lines
-- **Manuscript figures**: Figure 3B
+**`04b_plot_upset_calibration.R`**
+- Upset plot of shared/unique calibrated parameter sets across the 19 cell lines
 
-### Stage 4: Calibrated Model Analysis
+### Stage 4 — Calibrated model analysis (`analysis/04_calibrated_model_analysis/`)
 
 **`05_UMAP_calibrated_cells.ipynb`**
-- **Purpose**: UMAP analysis comparing calibrated simulations to experimental data
-- **Inputs**: Outputs from notebooks 04 and 01
-- **Analyses**: Dimensionality reduction, validation of calibrated model
-- **Manuscript figures**: Figure 3C
+- UMAP comparing calibrated simulations against experimental data
 
 **`06_PLSDA_cellline_discrimination.ipynb`**
-- **Purpose**: Identifies molecular parameters discriminating cell lines by AP-1 transcriptional state
-- **Analyses**: Partial Least Squares Discriminant Analysis (PLSDA)
-- **Dependencies**: `src/plsda_module.py`
-- **Manuscript figures**: Figure 3 (most panels)
-
-**`06b_COLO858_insilico_perturbations.ipynb`**
-- **Purpose**: Generates in silico perturbation simulations for COLO858 cells
-- **Analyses**: JUND knockdown and combination perturbations using calibrated COLO858 parameter sets
-- **Dependencies**: `src/COLO858_pertrubation_analysis.py`
-- **Outputs**: Perturbation simulation data used by notebooks 09, 10, 11
-- **Manuscript figures**: None (data generation for Figure 7)
+- Molecular parameters discriminating cell lines by AP-1 transcriptional state
+- Uses `src/plsda_module.py`
 
 **`07_MAPK_AP1_comparison_analysis.ipynb`**
-- **Purpose**: Compares MAPK and AP-1 protein levels between and within cells
-- **Analyses**:
-  - MAPK protein comparisons (between/within cells)
-  - Violin plots for AP-1 protein parameters from calibrated ODE model
-  - AP-1 expression under ERK inhibition
-- **Manuscript figures**: Figures 3, 4, 6
+- MAPK vs AP-1 protein comparisons (between and within cells)
+- Violin plots of AP-1 parameters from the calibrated model
+- AP-1 expression under ERK inhibition
 
 **`08_PLSDA_heterogeneity_analysis.ipynb`**
-- **Purpose**: PLSDA analysis of molecular parameters separating AP-1 states within and across cell lines
-- **Analyses**: Heterogeneity analysis using PLSDA
-- **Dependencies**: `src/plsda_module.py`
-- **Manuscript figures**: Figures 4, 5
+- PLSDA of molecular parameters separating AP-1 states within and across cell lines
+- Uses `src/plsda_module.py`
 
-### Stage 5: Perturbation Analysis (JUND Knockdown)
+### Stage 5 — JUND knockdown (`analysis/05_jund_kd_perturbation/`)
+
+**`06b_COLO858_insilico_perturbations.ipynb`**
+- Generates in silico JUND knockdown and combination perturbations from the
+  calibrated COLO858 parameter sets
+- Uses `src/COLO858_pertrubation_analysis.py`
+- Produces no figure; its output feeds `09`, `10`, and `11`
 
 **`09_COLO858_JUND_KD_analysis.ipynb`**
-- **Purpose**: Analyzes effects of JUND knockdown in COLO858 melanoma cells
-- **Analyses**: Pre/post perturbation analysis
-- **Manuscript figures**: Figure 7 (partial)
+- Pre/post perturbation analysis, dimer tracking, dose response
+- Uses `src/param_scan.py`
 
 **`10_COLO858_FRA2_PLSDA_analysis.ipynb`**
-- **Purpose**: Identifies molecular parameters causing elevated FRA2 expression after JUND knockdown
-- **Inputs**: Output from notebook 09
-- **Analyses**: PLSDA to identify mechanistic drivers
-- **Dependencies**: `src/plsda_module.py`
-- **Manuscript figures**: Figure 7 (partial)
+- Molecular parameters driving elevated FRA2 after JUND knockdown
+- Inputs: output of `09`; uses `src/plsda_module.py`
 
 **`11_COLO858_plot_JUND_KD_perturbations.ipynb`**
-- **Purpose**: Visualizes JUND knockdown and combined perturbation effects
-- **Analyses**: Plotting analysis for perturbation experiments
-- **Manuscript figures**: Figure 7 (one panel)
+- Plots JUND knockdown and combined perturbation effects
 
-## Source Code
+**`12_multiome_JUND_KD_analysis.Rmd`**
+- Experimental validation: 10x single-nucleus Multiome (RNA + ATAC) on
+  NTC_rep1, NTC_rep2, and JUND_KD
+- QC and doublet filtering, WNN joint RNA+ATAC clustering, Tsoi signature
+  scoring, differential markers, and cluster-proportion testing
+- Uses `src/propeller_JUND_v2.R` and `data/Tsoi_et_al_gene_list.csv`
+- Independent of the ODE model — reads the multiome data directly and reuses
+  per-sample checkpoints from the earlier 4-sample pipeline
 
-### Analysis Modules
+## Source code
 
-**`src/plsda_module.py`**
-- Custom implementation of Partial Least Squares Discriminant Analysis (PLSDA)
-- Used by notebooks: 06, 08, 10
-- Features: Cross-validation, class balancing, ROC analysis
+### Analysis modules
 
-**`src/COLO858_pertrubation_analysis.py`**
-- Module for generating COLO858 perturbation simulations
-- Used by notebook: 06b
+| File | Purpose | Used by |
+|------|---------|---------|
+| `src/plsda_module.py` | PLSDA implementation: cross-validation, class balancing, ROC | `06`, `08`, `10` |
+| `src/COLO858_pertrubation_analysis.py` | Perturbation simulation pipeline incl. dimer tracking | `06b` |
+| `src/param_scan.py` | Steady-state simulation and 1-D parameter sweeps via basico/COPASI | `09` |
+| `src/propeller_JUND_v2.R` | Cluster-proportion testing built on `speckle::propeller`, for the case where the KD condition has no biological replicates | `12` |
 
-### ODE Model and Simulation Infrastructure
+### ODE model and simulation infrastructure
 
-**`src/ap1_model_2_mod.cps`**
-- COPASI model file for AP-1 network ODE simulations
-- Used by: `src/run_simulation.py`
+| File | Purpose |
+|------|---------|
+| `src/ap1_model_2_mod.cps` | COPASI model of the AP-1 network |
+| `src/LHS_params_init_conds.py` | Generates 20,000 parameter sets and 210 initial conditions |
+| `src/run_simulation.py` | Runs the COPASI sweep across parameter sets and initial conditions |
+| `src/ap1.slurm` | Slurm batch script for the HPC run |
 
-**`src/LHS_params_init_conds.py`**
-- Generates 20,000 parameter sets and 210 initial conditions for Latin Hypercube Sampling
-- Output: Input files for large-scale ODE simulations
+## Data
 
-**`src/run_simulation.py`**
-- Runs ODE simulations using COPASI model across parameter sets and initial conditions
-- Executed on computing cluster via `src/ap1.slurm`
+`data/Tsoi_et_al_gene_list.csv` — melanoma differentiation-state signatures
+(Tsoi et al.), used by `12_multiome_JUND_KD_analysis.Rmd` for cell-state scoring.
 
-**`src/ap1.slurm`**
-- Slurm batch script for running large-scale simulations on HPC cluster
-
-## Manuscript Figure Mapping
-
-| Figure | Files | Description |
-|--------|-------|-------------|
-| Figure 1A | `plot_clustermap_figure1A.R` | Clustermap of AP-1 proteins and differentiation markers |
-| Figure 1, S1 | `01_process_singlecell_experimental_data.ipynb` | Single-cell experimental data analysis |
-| Figure 2 | `03_analyze_uncalibrated_model.ipynb` | Uncalibrated model dynamics |
-| Figure 3A | `04_calibrate_model_to_experiments.ipynb` | Model calibration logic |
-| Figure 3B | `04b_plot_upset_calibration_figure3B.R` | Upset plot of parameter set retention across cell lines |
-| Figure 3C | `05_UMAP_calibrated_cells.ipynb` | UMAP validation of calibration |
-| Figure 3 (other) | `06_PLSDA_cellline_discrimination.ipynb`, `07_MAPK_AP1_comparison_analysis.ipynb` | Cell line discrimination, MAPK/AP-1 comparisons |
-| Figure 4 | `07_MAPK_AP1_comparison_analysis.ipynb`, `08_PLSDA_heterogeneity_analysis.ipynb` | Protein comparisons, heterogeneity analysis |
-| Figure 5 | `08_PLSDA_heterogeneity_analysis.ipynb` | AP-1 state heterogeneity |
-| Figure 6 | `07_MAPK_AP1_comparison_analysis.ipynb` | ERK inhibition analysis |
-| Figure 7 | `09_COLO858_JUND_KD_analysis.ipynb`, `10_COLO858_FRA2_PLSDA_analysis.ipynb`, `11_COLO858_plot_JUND_KD_perturbations.ipynb` | JUND knockdown perturbation analysis |
+Note: the Rmd currently reads this file from its `/Volumes/...` copy rather than
+from `data/`. The two should be kept in sync, or the Rmd repointed at the repo copy.
 
 ## Dependencies
 
-### Python
-- Standard scientific Python stack (numpy, pandas, matplotlib, seaborn, scikit-learn)
-- UMAP for dimensionality reduction
-- COPASI Python API (basico) for ODE simulations
+Conda environment:
 
-### R
-- tidyverse
-- UpSetR (for upset plots)
-- pheatmap or ComplexHeatmap (for clustermaps)
+```bash
+conda env create -f environment.yml   # or environment-minimal.yml
+conda activate ap1_proj
+```
+
+`environment.yml` pins exact builds from the working environment;
+`environment-minimal.yml` lists unpinned core packages for lighter installs.
+Both create an environment named `ap1_proj`.
+
+**Python** — numpy, pandas, matplotlib, seaborn, scikit-learn, umap-learn,
+basico (COPASI API), tqdm
+
+**R** — tidyverse, UpSetR, ComplexHeatmap, Seurat, Signac, UCell,
+EnsDb.Hsapiens.v86, GenomicRanges, GenomeInfoDb, Rsamtools,
+SingleCellExperiment, speckle, patchwork

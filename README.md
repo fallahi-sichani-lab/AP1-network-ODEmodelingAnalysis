@@ -32,22 +32,16 @@ than in directory names.
 
 **No datasets are distributed here.** The repo documents and preserves the
 analysis itself — what was computed, in what order, to produce which figure.
-The 4i single-cell measurements, the LHS simulation output, and the multiome
-data are not included; they are large and live on lab storage.
+The 4i single-cell measurements, the simulation output, and the multiome data
+are not included.
 
-Running these scripts as-is is therefore not expected to work out of the box.
-The data paths in them are specific to our lab environment: most scripts read by
-bare filename or by a path relative to whatever directory they were run from
-(e.g. `pd.read_csv('20260521_ap1_select_filtered.csv')`,
-`read_csv("processed_simulations/...")`), and a few contain absolute
-`/Volumes/FallahiLab/...` paths.
+Input paths in the scripts point at the environment the analysis was originally
+run in, so reusing any of this means supplying the data and adjusting those
+paths. What the code provides is the method, the parameter choices, and the
+exact sequence of steps.
 
-To reuse any of this, expect to obtain the data separately and adapt the input
-paths to your own layout. What the code gives you is the method, the parameter
-choices, and the exact sequence of steps.
-
-The one piece that does work from any directory is importing this repo's own
-Python and R helpers — see below.
+Importing this repo's own Python and R helpers works from any directory — see
+below.
 
 ### Importing `src/` modules
 
@@ -179,9 +173,6 @@ perturbation stage even though it sorts near `06`.
 
 `data/Tsoi_et_al_gene_list.csv` — melanoma differentiation-state signatures
 (Tsoi et al.), used by `12_multiome_JUND_KD_analysis.Rmd` for cell-state scoring.
-
-Note: the Rmd currently reads this file from its `/Volumes/...` copy rather than
-from `data/`. The two should be kept in sync, or the Rmd repointed at the repo copy.
 
 ## Dependencies
 

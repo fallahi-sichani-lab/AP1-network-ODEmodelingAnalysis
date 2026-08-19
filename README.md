@@ -25,11 +25,6 @@ Note: **Figures.md is in progress and will be updated**
 └── environment.yml                  # Conda environment
 ```
 
-Folders follow **run order**, not figure number. A single script often feeds
-several figures (`07` feeds Figures 3, 4, and 6), and figure numbers change
-during revision — so the figure mapping lives in [FIGURES.md](FIGURES.md) rather
-than in directory names.
-
 ## This repository is code only
 
 **No datasets are distributed here.** The repo documents and preserves the

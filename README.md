@@ -7,14 +7,12 @@ validation by single-nucleus multiome (RNA + ATAC).
 
 **Looking for the script behind a specific figure? See [FIGURES.md](FIGURES.md).**
 
-Note: **Figures.md is in progress and will be updated**
-
 ## Repository structure
 
 ```
 .
 ├── analysis/                        # Notebooks and R scripts, grouped by pipeline stage
-│   ├── 01_experimental_data/        # 4i single-cell measurements
+│   ├── 01_experimental_data_analysis/ # 4i single-cell measurements
 │   ├── 02_model_simulation/         # LHS sweep processing, uncalibrated model
 │   ├── 03_calibration/              # Calibration to experimental data
 │   ├── 04_calibrated_model_analysis/# PLSDA, UMAP, heterogeneity

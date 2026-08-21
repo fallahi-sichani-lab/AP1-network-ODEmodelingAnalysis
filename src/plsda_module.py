@@ -386,7 +386,7 @@ class PLSDA:
         if size is None:
             size = [100, 100]
         
-        plt.figure(figsize=(8, 8))
+        plt.figure(figsize=(6, 6))
 
         for i, (color, alpha, line_color) in enumerate(zip(colors, alpha_values, line_colors)):
             mask = y == i
@@ -440,7 +440,7 @@ class PLSDA:
             size = [100, 100]
         
         # Create a figure with gridspec
-        fig = plt.figure(figsize=(8, 8))
+        fig = plt.figure(figsize=(6, 6))
         gs = gridspec.GridSpec(4, 4)
         
         # Create main scatter plot (larger, takes most of the space)
@@ -798,7 +798,7 @@ class PLSDA:
         aucs = []
         mean_fpr = np.linspace(0, 1, 100)
 
-        fig, ax = plt.subplots(figsize=(8, 8))
+        fig, ax = plt.subplots(figsize=(6, 6))
         
         for i, (train, test) in enumerate(cv.split(X, y)):
             # Get fold data
@@ -936,7 +936,7 @@ class PLSDA:
         mean_fpr = np.linspace(0, 1, 100)
         
         # Create figure for ROC curve
-        fig1, ax1 = plt.subplots(figsize=(8, 6))
+        fig1, ax1 = plt.subplots(figsize=(6, 6))
         
         # Color map for different repeats (if showing individual curves)
         colors = plt.cm.jet(np.linspace(0, 1, n_repeats))
@@ -1233,7 +1233,7 @@ class PLSDA:
         
         
         # Create figure
-        fig, ax = plt.subplots(figsize=(8, 8))
+        fig, ax = plt.subplots(figsize=(6, 6))
         
         # Determine bar colors
         bar_colors = [colors[0] if score < 0 else colors[1] for score in sorted_vip_scores]

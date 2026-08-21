@@ -689,6 +689,7 @@ cat("Using resolution", chosen_res, "with",
 ```
 
 # 13. Tsoi signature scoring (annotation)
+# Figure 7D (avergae z-score UCell heatmap of tsoi signatures across WNN clusters)
 
 ```{r ucell}
 tsoi_raw <- read.csv(tsoi_path, check.names = FALSE, stringsAsFactors = FALSE)
@@ -947,7 +948,8 @@ ggsave(
 
 # 14. WNN figures
 
-## Figure W1 — Three-panel WNN UMAP
+## Figure 7C — WNN UMAP
+# Figures S7A, S7B
 
 ```{r figW1-wnn-umap-trio, fig.width=18, fig.height=6}
 p_w_sample <- DimPlot(
@@ -1077,7 +1079,7 @@ ggsave(
 ```
 
 
-## Figure W3 — Cluster composition per sample
+## Figure 7F — Cluster composition per sample
 
 ```{r figW3-cluster-composition, fig.width=8, fig.height=5}
 sample_levels <- sample_names
@@ -1115,7 +1117,7 @@ result <- run_propeller_analysis(
 ```
 
 
-## Figure W4 — Cluster shifts: JUND_KD vs NTC
+## Figure 7F — Cluster shifts: JUND_KD vs NTC
 
 ```{r figW4-cluster-shifts}
 library(purrr)
@@ -1126,10 +1128,6 @@ library(ggpubr)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-
-# -----------------------------
-# User inputs
-# -----------------------------
 
 cluster_col <- "wnn_clusters"
 sample_col <- "orig.ident"
@@ -1466,7 +1464,7 @@ log_msg("RNA summary saved; starting ATAC...")
 ```
 
 
-# plot heatmap of tsoi genes with FindAllMarkers
+# Figure 7E - Heatmap of tsoi genes with FindAllMarkers
 
 ```{r}
 RNA_MARKER_LOGFC_CUTOFF <- 0.5

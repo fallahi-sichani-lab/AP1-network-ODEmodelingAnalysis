@@ -73,6 +73,8 @@ col_fun3 <- colorRamp2(
 cell_size_factor_w <- 0.3 # cm per column, adjust this
 cell_size_factor_h <- 0.3 # cm per row, adjust this
 
+### Figure 1A
+
 # 3) Rebuild the two Heatmap objects, feeding in your hclusts
 ht_ap1 <- Heatmap(
   mat_ap1,

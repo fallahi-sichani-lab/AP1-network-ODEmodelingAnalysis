@@ -1,5 +1,5 @@
 # ============================================================================
-# UpSet Plot for AP-1 Calibrated Parameters Analysis
+# UpSet Plot for AP-1 Calibrated Parameters Analysis (Figure 3B)
 # ============================================================================
 
 # Load required libraries
